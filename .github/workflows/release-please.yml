@@ -28,3 +28,6 @@ jobs:
     uses: ./.github/workflows/release.yml
     with:
       tag_name: ${{ needs.release-please.outputs.tag_name }}
+    # The Homebrew job needs the SDK bot credentials. Passing all repository
+    # secrets also keeps workflow_dispatch retries equivalent to called runs.
+    secrets: inherit

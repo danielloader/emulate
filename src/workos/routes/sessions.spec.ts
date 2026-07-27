@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach } from 'bun:test';
 import { createServer, type ApiKeyMap } from '../../core/index.js';
 import { workosPlugin } from '../index.js';
 import { getWorkOSStore } from '../store.js';
@@ -44,6 +44,10 @@ describe('Session routes', () => {
       organization_id: null,
       ip_address: null,
       user_agent: null,
+      auth_method: 'password',
+      status: 'active',
+      expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+      ended_at: null,
     });
 
     const res = await app.request(
@@ -78,6 +82,10 @@ describe('Session routes', () => {
       organization_id: null,
       ip_address: null,
       user_agent: null,
+      auth_method: 'password',
+      status: 'active',
+      expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+      ended_at: null,
     });
 
     const res = await app.request(`/user_management/sessions/logout?session_id=${session.id}`);
