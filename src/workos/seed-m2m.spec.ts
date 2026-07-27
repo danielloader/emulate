@@ -82,14 +82,17 @@ describe('Seeding M2M applications and API keys', () => {
       },
     });
 
-    // The seeded value is registered in the auth allow-list, so it authenticates.
+    // The seeded value is registered in the auth allow-list, so it authenticates — and
+    // validation hands back the resource, permissions included.
     const validateRes = await fetch(`${emulator.url}/api_keys/validations`, {
       method: 'POST',
       headers: auth('sk_test_ci'),
-      body: JSON.stringify({ key: 'sk_test_ci' }),
+      body: JSON.stringify({ value: 'sk_test_ci' }),
     });
     expect(validateRes.status).toBe(200);
-    expect(((await validateRes.json()) as any).valid).toBe(true);
+    const validated = ((await validateRes.json()) as any).api_key;
+    expect(validated.name).toBe('CI Key');
+    expect(validated.permissions).toEqual(['posts:read']);
 
     // And it appears as a spec-aligned api_key resource.
     const oid = await firstOrgId('sk_test_ci');
@@ -226,9 +229,9 @@ describe('Seeding M2M applications and API keys', () => {
     const validateRes = await fetch(`${emulator.url}/api_keys/validations`, {
       method: 'POST',
       headers: auth('sk_test_live2'),
-      body: JSON.stringify({ key: 'sk_test_expired' }),
+      body: JSON.stringify({ value: 'sk_test_expired' }),
     });
-    expect(((await validateRes.json()) as any).valid).toBe(false);
+    expect(((await validateRes.json()) as any).api_key).toBeNull();
 
     const oid = await firstOrgId('sk_test_live2');
     const listRes = await fetch(`${emulator.url}/organizations/${oid}/api_keys`, { headers: auth('sk_test_live2') });
@@ -279,9 +282,9 @@ describe('Seeding M2M applications and API keys', () => {
     const validateRes = await fetch(`${emulator.url}/api_keys/validations`, {
       method: 'POST',
       headers: auth('sk_test_reset'),
-      body: JSON.stringify({ key: 'sk_test_reset' }),
+      body: JSON.stringify({ value: 'sk_test_reset' }),
     });
-    expect(((await validateRes.json()) as any).valid).toBe(true);
+    expect(((await validateRes.json()) as any).api_key).not.toBeNull();
   });
 });
 
@@ -347,5 +350,37 @@ describe('Seed config validation for M2M apps and API keys', () => {
   it('does not validate the legacy apiKeys map form as resources', () => {
     const result = validateSeedConfig({ apiKeys: { sk_test_x: { environment: 'test' } } });
     expect(result.valid).toBe(true);
+  });
+
+  // Two entries sharing a value split the key's identity: the auth allow-list keeps the
+  // last one's expiry while the record lookup resolves the first, so validation would gate
+  // on one entry and report the other's owner and permissions.
+  it('rejects duplicate api key values', () => {
+    expect(
+      findError(
+        {
+          organizations: [{ name: 'A' }, { name: 'B' }],
+          apiKeys: [
+            { name: 'First', organization: 'A', value: 'sk_test_dup' },
+            { name: 'Second', organization: 'B', value: 'sk_test_dup' },
+          ],
+        },
+        'apiKeys[1].value',
+      )?.message,
+    ).toContain('unique');
+  });
+
+  it('accepts distinct api key values, and omitted ones', () => {
+    const result = validateSeedConfig({
+      organizations: [{ name: 'A' }],
+      apiKeys: [
+        { name: 'First', organization: 'A', value: 'sk_test_one' },
+        { name: 'Second', organization: 'A', value: 'sk_test_two' },
+        // Omitted values are generated per key, so two of them are not a collision.
+        { name: 'Third', organization: 'A' },
+        { name: 'Fourth', organization: 'A' },
+      ],
+    });
+    expect(result).toEqual({ valid: true, errors: [] });
   });
 });

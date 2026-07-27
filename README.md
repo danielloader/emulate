@@ -328,11 +328,19 @@ The `access_token` is an RS256 JWT signed with the same key the emulator publish
 | `iss`    | the emulator base URL (e.g. `http://localhost:4100`)   |
 | `aud`    | the app's `audience` if set, otherwise the `client_id` |
 | `sub`    | the requesting `client_id`                             |
-| `scp`    | granted scopes (array)                                 |
+| `jti`    | a unique token identifier (ULID)                       |
+| `scope`  | granted scopes, space-delimited                        |
 | `org_id` | the application's owning organization                  |
 
-Set `audience` on the seeded application to match what your real WorkOS environment emits, so a
-consumer that validates the `aud` claim accepts emulator tokens unchanged.
+The claim set mirrors a production M2M token, because the SDKs parse it: scopes are a
+space-delimited `scope` **string** (not an array, and not `scp`), and `jti` is always present —
+the WorkOS SDKs reject an M2M token that lacks it, however well-signed.
+
+> **Set `audience` on the seeded application.** In production `aud` is your environment's client
+> ID, which is _not_ the M2M application's `client_id` — and the SDKs default the expected
+> audience to the environment client ID. The emulator has no environment-level client ID to fall
+> back on, so it uses the requesting `client_id`. Pin `audience` to the value your real WorkOS
+> environment emits and a consumer that validates `aud` accepts emulator tokens unchanged.
 
 A request may narrow to a subset of the application's scopes via `-d scope="posts:read"`;
 requesting a scope the application does not have returns `400 invalid_scope`, so scope-based
@@ -351,7 +359,7 @@ organizations:
 apiKeys:
   - name: CI Key
     organization: Acme Corp # owner org, by name (or use `user_id`)
-    value: sk_test_ci_key # optional; must start with `sk_`; generated if omitted
+    value: sk_test_ci_key # optional; must start with `sk_` and be unique; generated if omitted
     permissions: [posts:read, posts:write]
     # expires_at: 2030-01-01T00:00:00.000Z   # optional; never expires if omitted
 ```
@@ -361,13 +369,45 @@ apiKeys:
 curl http://localhost:4100/connect/applications -H "Authorization: Bearer sk_test_ci_key"
 ```
 
+Validate a key the way the SDKs do — `POST /api_keys/validations` with the key in `value`:
+
+```bash
+curl -X POST http://localhost:4100/api_keys/validations \
+  -H "Authorization: Bearer sk_test_ci_key" -H "Content-Type: application/json" \
+  -d '{"value":"sk_test_ci_key"}'
+```
+
+```json
+{
+  "api_key": {
+    "object": "api_key",
+    "id": "api_key_01K...",
+    "name": "CI Key",
+    "owner": { "type": "organization", "id": "org_01K..." },
+    "obfuscated_value": "sk_..._key",
+    "permissions": ["posts:read", "posts:write"],
+    "last_used_at": null,
+    "expires_at": null,
+    "created_at": "2026-01-15T12:00:00.000Z",
+    "updated_at": "2026-01-15T12:00:00.000Z"
+  }
+}
+```
+
+A valid key returns the whole `api_key` object — `permissions` included, so permission-based
+authorization can be exercised locally. An invalid, expired, or unknown key is `200` with
+`{"api_key": null}`, not an error — matching production and what the SDKs read. The raw value is
+never echoed back; only `obfuscated_value`.
+
 The `organization` (or the org supplied via `user_id`) must reference a seeded organization;
 an unresolved name fails fast at startup. A key seeded with an already-past `expires_at` is still
 created as a resource but does **not** authenticate, and deleting a key via `DELETE /api_keys/:id`
 stops it authenticating immediately — matching production.
 
 `apiKeys` also accepts the legacy auth allow-list map form (`{ sk_xxx: { environment } }`), which
-only registers values for authentication without creating resources.
+only registers values for authentication without creating resources. A map-form value authenticates
+requests but has no `api_key` resource behind it, so validating one returns `{"api_key": null}` —
+use the array form for keys your code validates.
 
 ## Testing Your Login Flow End-to-End
 
