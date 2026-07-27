@@ -15,8 +15,10 @@ import {
   emitAuthenticationEvent,
   generateCode,
   formatAuthChallenge,
+  acceptInvitation,
 } from '../helpers.js';
 import type { EventBus } from '../event-bus.js';
+import type { WorkOSInvitation } from '../entities.js';
 import { STORE_KEYS, STORE_KEY_PREFIXES } from '../constants.js';
 import { renderLoginPage } from '../login-page.js';
 
@@ -24,7 +26,21 @@ interface PendingAuth {
   user_id: string;
   organization_id: string | null;
   auth_method: string;
+  /** Carried across an MFA challenge so the second factor doesn't drop a pending invitation. */
+  invitation_token?: string | null;
 }
+
+/**
+ * The grants whose request schema carries `invitation_token`. Production has nowhere to put one on
+ * any other grant, so it is ignored rather than honored there — accepting it everywhere would let
+ * a call that works against the emulator silently skip the invitation in production.
+ */
+const INVITATION_TOKEN_GRANTS = new Set([
+  'authorization_code',
+  'password',
+  'urn:workos:oauth:grant-type:magic-auth',
+  'urn:workos:oauth:grant-type:magic-auth:code',
+]);
 
 interface AuthorizeParams {
   redirectUri: string;
@@ -167,6 +183,27 @@ export function authRoutes(ctx: RouteContext): void {
     const requestIp = c.req.header('x-forwarded-for') ?? null;
     const requestUserAgent = c.req.header('user-agent') ?? null;
 
+    /** Resolve an invitation token, rejecting one that is unknown, expired or already used. */
+    const resolveInvitation = (token: string): WorkOSInvitation => {
+      const inv = ws.invitations.findOneBy('token', token);
+      if (!inv || inv.state !== 'pending' || isExpired(inv.expires_at)) {
+        throw new WorkOSApiError(
+          400,
+          'The invitation is invalid, expired, or has already been accepted',
+          'invitation_invalid',
+        );
+      }
+      return inv;
+    };
+
+    // Resolved before the grant runs so a bad invitation cannot burn the one-time code or
+    // authorization code the same request carries; the recipient check waits until the grant has
+    // told us who is signing in.
+    let invitation: WorkOSInvitation | null =
+      INVITATION_TOKEN_GRANTS.has(grantType) && body.invitation_token
+        ? resolveInvitation(body.invitation_token as string)
+        : null;
+
     /** Emit the spec's authentication.*_failed event for a credential failure, then throw. */
     const failAuth: (
       method: string,
@@ -204,6 +241,7 @@ export function authRoutes(ctx: RouteContext): void {
         user_id: mfaUser.id,
         organization_id: orgId,
         auth_method: primaryMethod,
+        invitation_token: invitation?.token ?? null,
       });
       const challenge = ws.authChallenges.insert({
         object: 'authentication_challenge',
@@ -432,11 +470,19 @@ export function authRoutes(ctx: RouteContext): void {
           );
         }
 
+        // A deferred invitation is revalidated before the challenge and pending token are consumed.
+        // One revoked or expired during the challenge still fails the request, but the state behind
+        // it survives, so a retry reports the same invitation_invalid rather than degrading into a
+        // confusing invalid_pending_authentication_token once the record is gone.
+        const deferredInvitation = pending.invitation_token ? resolveInvitation(pending.invitation_token) : null;
+
         ws.authChallenges.delete(challenge.id);
         store.setData(`${STORE_KEY_PREFIXES.pendingAuth}${pendingToken}`, undefined);
 
         user = ws.users.get(pending.user_id);
         organizationId = pending.organization_id;
+        // Accepted further down, now that the second factor has proven who is signing in.
+        invitation = deferredInvitation;
         // Event is authentication.mfa_succeeded; the session records the primary factor the
         // pending token was issued for (MFA is a second factor, not a session auth method).
         authMethod = 'MFA';
@@ -464,10 +510,30 @@ export function authRoutes(ctx: RouteContext): void {
         const org = ws.organizations.get(orgId);
         if (!org) throw notFound('Organization');
 
+        // Production only scopes a session to an organization the user actually belongs to.
+        // Unvalidated, a client could select any organization id and receive a token whose
+        // org_id claim production would never issue. Checked before the pending token is
+        // consumed, so a client that picks the wrong organization can retry with the right one.
+        const selectable = ws.organizationMemberships
+          .findBy('organization_id', orgId)
+          .find((m) => m.user_id === pending.user_id && m.status === 'active');
+        if (!selectable) {
+          throw new WorkOSApiError(
+            400,
+            'The user is not an active member of the selected organization',
+            'organization_membership_not_found',
+          );
+        }
+
+        // An invitation deferred to the selection step (one naming no organization of its own) is
+        // revalidated on the same before-consumption rule as the MFA grant above.
+        const deferredInvitation = pending.invitation_token ? resolveInvitation(pending.invitation_token) : null;
+
         store.setData(`${STORE_KEY_PREFIXES.pendingAuth}${pendingToken}`, undefined);
 
         user = ws.users.get(pending.user_id);
         organizationId = orgId;
+        invitation = deferredInvitation;
         authMethod = pending.auth_method;
         break;
       }
@@ -501,6 +567,82 @@ export function authRoutes(ctx: RouteContext): void {
     }
 
     if (!user) throw notFound('User');
+
+    // Accepting an invitation is the one way a caller can name the organization on a grant that
+    // takes no organization_id, so an invitation's organization wins over anything the grant itself
+    // chose and settles the resolution below.
+    // Rejected before anything is consumed, so a token addressed to somebody else costs the caller
+    // neither their credential nor the invitation. Compared case-insensitively: an invitation to
+    // Foo@example.com is for the same person as foo@example.com, and rejecting on letter case alone
+    // would be a false negative.
+    if (invitation && invitation.email.toLowerCase() !== user.email.toLowerCase()) {
+      throw new WorkOSApiError(
+        400,
+        'The invitation was issued for a different email address',
+        'invitation_cannot_be_used_for_email',
+      );
+    }
+    // The organization is read here, but the invitation is not spent until this request is known to
+    // be issuing a session — see the acceptance below the resolution step.
+    if (invitation?.organization_id) organizationId = invitation.organization_id;
+
+    // Resolve the organization for any fresh login that hasn't already picked one. Production
+    // does this on every grant: a single active membership is selected implicitly, several
+    // return organization_selection_required so the client can choose. Only three of the grants
+    // above set organizationId themselves, and authorization_code reads it off a code minted
+    // with organization_id: null — so without this step magic-auth, password, email-verification,
+    // device_code and the whole AuthKit hosted flow could each mint only an unscoped session,
+    // and anything authorizing on the org_id claim rejected every token the emulator issued.
+    //
+    // Runs before the session is created so the session records the resolved organization and a
+    // selection-required response leaves behind neither a session nor a sign-in timestamp. A
+    // refresh is excluded: it reuses a session whose scope is already settled, and an explicit
+    // body.organization_id stays the only way to move an existing session between orgs.
+    if (isFreshLogin && !organizationId) {
+      const selectableOrgs: Array<{ id: string; name: string }> = [];
+      for (const m of ws.organizationMemberships.findBy('user_id', user.id)) {
+        // 'pending' is an unaccepted invitation and 'inactive' a deactivated member; neither is
+        // an organization production would scope a session to.
+        if (m.status !== 'active') continue;
+        const org = ws.organizations.get(m.organization_id);
+        if (org) selectableOrgs.push({ id: org.id, name: org.name });
+      }
+
+      if (selectableOrgs.length === 1) {
+        organizationId = selectableOrgs[0].id;
+      } else if (selectableOrgs.length > 1) {
+        // The spec documents the organization_selection_required code but not this response body
+        // (as with mfa_challenge above); the pending token, organization list and user mirror
+        // WorkOS. The pending token carries the method so the session the organization-selection
+        // grant eventually creates reports the original factor rather than 'unknown', and any
+        // still-unspent invitation so the selection step can finish accepting it.
+        const pendingToken = generateId('pending');
+        store.setData(`${STORE_KEY_PREFIXES.pendingAuth}${pendingToken}`, {
+          user_id: user.id,
+          organization_id: null,
+          auth_method: sessionAuthMethod ?? authMethod,
+          invitation_token: invitation?.token ?? null,
+        });
+        return c.json(
+          {
+            code: 'organization_selection_required',
+            message: 'The user must choose an organization to finish their authentication.',
+            pending_authentication_token: pendingToken,
+            organizations: selectableOrgs,
+            user: formatUser(user),
+          },
+          403,
+        );
+      }
+    }
+
+    // Past every continuation check, so this request is the one issuing a session. Spending the
+    // invitation only now is what stops a one-time invitation being burned by an mfa_challenge or
+    // organization_selection_required response the client may never come back from — and it still
+    // lands before the role lookup below, which reads the membership it creates.
+    if (invitation) {
+      acceptInvitation(invitation, user, ws, store.getData<EventBus>(STORE_KEYS.eventBus));
+    }
 
     // A fresh login creates a new session (firing session.created); a refresh_token rotation
     // reuses the existing session, so it emits neither session.created nor an auth event.
@@ -552,6 +694,9 @@ export function authRoutes(ctx: RouteContext): void {
       sid: session.id,
       org_id: organizationId ?? undefined,
       role: roleSlug,
+      // Production emits the plural `roles` alongside `role`; the emulator models one role per
+      // membership, so it is that role as a single-element array.
+      roles: roleSlug ? [roleSlug] : undefined,
       permissions: permissionSlugs,
       aud: clientId ?? 'workos-emulate',
     });
