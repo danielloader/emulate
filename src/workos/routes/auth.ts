@@ -17,6 +17,7 @@ import {
   formatAuthChallenge,
   acceptInvitation,
 } from '../helpers.js';
+import { renderConfiguredJwtTemplate } from '../jwt-template.js';
 import type { EventBus } from '../event-bus.js';
 import type { WorkOSInvitation } from '../entities.js';
 import { STORE_KEYS, STORE_KEY_PREFIXES } from '../constants.js';
@@ -644,6 +645,13 @@ export function authRoutes(ctx: RouteContext): void {
       acceptInvitation(invitation, user, ws, store.getData<EventBus>(STORE_KEYS.eventBus));
     }
 
+    // Render template claims before anything is persisted. A template that cannot render fails the
+    // request, and rendering here means that failure leaves no orphaned session, no bumped
+    // last_sign_in_at, and no session.created/user.updated webhook implying a login that never
+    // completed. It has to follow acceptInvitation above, whose membership the context reads; the
+    // pre-update `user` record is equivalent, since no template variable exposes last_sign_in_at.
+    const templateClaims = renderConfiguredJwtTemplate(store, ws, user, organizationId);
+
     // A fresh login creates a new session (firing session.created); a refresh_token rotation
     // reuses the existing session, so it emits neither session.created nor an auth event.
     let session;
@@ -689,17 +697,20 @@ export function authRoutes(ctx: RouteContext): void {
       }
     }
 
-    const accessToken = jwt.sign({
-      sub: user.id,
-      sid: session.id,
-      org_id: organizationId ?? undefined,
-      role: roleSlug,
-      // Production emits the plural `roles` alongside `role`; the emulator models one role per
-      // membership, so it is that role as a single-element array.
-      roles: roleSlug ? [roleSlug] : undefined,
-      permissions: permissionSlugs,
-      aud: clientId ?? 'workos-emulate',
-    });
+    const accessToken = jwt.sign(
+      {
+        sub: user.id,
+        sid: session.id,
+        org_id: organizationId ?? undefined,
+        role: roleSlug,
+        // Production emits the plural `roles` alongside `role`; the emulator models one role per
+        // membership, so it is that role as a single-element array.
+        roles: roleSlug ? [roleSlug] : undefined,
+        permissions: permissionSlugs,
+        aud: clientId ?? 'workos-emulate',
+      },
+      { claims: templateClaims },
+    );
 
     // Store a real refresh token
     const newRefreshToken = ws.refreshTokens.insert({
