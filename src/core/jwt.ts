@@ -30,6 +30,20 @@ export interface JWTClaims {
   scope?: string;
   /** Unique token identifier. Required on M2M tokens by the WorkOS SDKs. */
   jti?: string;
+  /** The OAuth client the token was minted for; production AuthKit includes it. */
+  client_id?: string;
+  /** Unix-seconds timestamp of the user's most recent active authentication. */
+  auth_time?: number;
+  /**
+   * RFC 8693 actor claim, present only when the session was started via impersonation.
+   * The nested `sub` carries the impersonator's email, the identifier the session-tokens
+   * reference documents (and the only one production surfaces for impersonators).
+   */
+  act?: { sub: string };
+  /** Entitlement slugs of the organization the session is scoped to; omitted when empty. */
+  entitlements?: string[];
+  /** Slugs of feature flags resolving true for the session's user/org context; omitted when empty. */
+  feature_flags?: string[];
   iss: string;
   aud: string;
   exp: number;

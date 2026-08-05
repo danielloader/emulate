@@ -204,6 +204,8 @@ describe('JWT templates end to end', () => {
     const { body } = await login(emulator.url);
     expect(Object.keys(decode(body.access_token)).sort()).toEqual([
       'aud',
+      'auth_time',
+      'client_id',
       'exp',
       'iat',
       'iss',
