@@ -25,6 +25,9 @@ import {
   generateCode,
   formatAuthChallenge,
   acceptInvitation,
+  findUserByEmail,
+  requireEmailString,
+  emailsMatch,
 } from '../helpers.js';
 import { renderConfiguredJwtTemplate } from '../jwt-template.js';
 import type { EventBus } from '../event-bus.js';
@@ -72,7 +75,9 @@ export function authRoutes(ctx: RouteContext): void {
 
     let user;
     if (loginHint) {
-      user = ws.users.findOneBy('email', loginHint);
+      // Case-insensitively, like every other lookup by email: Magic Auth stores the case it was
+      // handed, so an account created as 'User@x.test' has to be reachable as 'user@x.test'.
+      user = findUserByEmail(ws, loginHint);
       if (!user) {
         const redirect = new URL(redirectUri);
         redirect.searchParams.set('error', 'user_not_found');
@@ -379,13 +384,13 @@ export function authRoutes(ctx: RouteContext): void {
       }
 
       case 'password': {
-        const email = body.email as string;
+        const email = requireEmailString(body.email);
         const password = body.password as string;
         if (!email || !password) {
           throw new OauthApiError(400, 'invalid_request', 'email and password are required.');
         }
 
-        user = ws.users.findOneBy('email', email);
+        user = findUserByEmail(ws, email);
         if (!user || !user.password_hash || !verifyPassword(password, user.password_hash)) {
           // Verified live: 400 (not 401) with the email interpolated. `password` is an RFC 6749
           // grant that nonetheless fails with the plain shape, which is why the credential
@@ -414,12 +419,16 @@ export function authRoutes(ctx: RouteContext): void {
       case 'urn:workos:oauth:grant-type:magic-auth':
       case 'urn:workos:oauth:grant-type:magic-auth:code': {
         const code = body.code as string;
-        const email = body.email as string;
+        const email = requireEmailString(body.email);
         if (!code || !email) {
           throw new OauthApiError(400, 'invalid_request', 'code and email are required.');
         }
 
-        const magicAuth = ws.magicAuths.all().find((ma) => ma.code === code && ma.email === email);
+        // Case-insensitively, because code creation resolves the user that way: a code requested
+        // for 'user@x.test' against a stored 'User@X.test' is recorded under the stored casing,
+        // so an exact match here would hand back a code that the address it was requested for
+        // could never redeem.
+        const magicAuth = ws.magicAuths.all().find((ma) => ma.code === code && emailsMatch(ma.email, email));
         if (!magicAuth) {
           failAuth('MagicAuth', { email }, new WorkOSApiError(400, 'Invalid one-time code', 'invalid_one_time_code'));
         }
@@ -670,7 +679,7 @@ export function authRoutes(ctx: RouteContext): void {
     // neither their credential nor the invitation. Compared case-insensitively: an invitation to
     // Foo@example.com is for the same person as foo@example.com, and rejecting on letter case alone
     // would be a false negative.
-    if (invitation && invitation.email.toLowerCase() !== user.email.toLowerCase()) {
+    if (invitation && !emailsMatch(invitation.email, user.email)) {
       throw new WorkOSApiError(
         400,
         'The invitation was issued for a different email address',
@@ -750,7 +759,16 @@ export function authRoutes(ctx: RouteContext): void {
     // reuses the existing session, so it emits neither session.created nor an auth event.
     let session;
     if (isFreshLogin) {
-      ws.users.update(user.id, { last_sign_in_at: new Date().toISOString() });
+      // A redeemed magic-auth code proves mailbox ownership, so production marks the email
+      // verified. Folded into the sign-in write rather than done up in the grant: one
+      // user.updated per login instead of two, and nothing is persisted before the template
+      // gate above — which is what keeps a failed render from implying a login that never
+      // completed. Only set when it actually changes, so a repeat sign-in stays quiet.
+      const verifyEmail = authMethod === 'MagicAuth' && !user.email_verified;
+      ws.users.update(user.id, {
+        last_sign_in_at: new Date().toISOString(),
+        ...(verifyEmail ? { email_verified: true } : {}),
+      });
       session = ws.sessions.insert({
         object: 'session',
         user_id: user.id,

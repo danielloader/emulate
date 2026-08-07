@@ -7,6 +7,8 @@ import {
   isExpired,
   assertAllowedRedirectUri,
   emitAuthenticationEvent,
+  findUserByEmail,
+  emailsMatch,
 } from '../helpers.js';
 import type { WorkOSConnection } from '../entities.js';
 import type { EventBus } from '../event-bus.js';
@@ -48,8 +50,13 @@ export function ssoRoutes(ctx: RouteContext): void {
     }
 
     const email = loginHint ?? `user@${connection.domains[0]?.domain ?? 'example.com'}`;
-    let profile = ws.ssoProfiles.findOneBy('email', email);
-    if (!profile || profile.connection_id !== connection.id) {
+    // The last exact-match lookup by email, matched on the connection at the same time rather
+    // than after. `findOneBy` returns the first profile for the address whatever connection it
+    // belongs to, so a second connection never matched its own profile and minted another on
+    // every authorize. Case-insensitive for the reason the rest are: a login_hint differing only
+    // in case is the same federated person.
+    let profile = ws.ssoProfiles.all().find((p) => p.connection_id === connection.id && emailsMatch(p.email, email));
+    if (!profile) {
       profile = ws.ssoProfiles.insert({
         object: 'profile',
         connection_id: connection.id,
@@ -196,7 +203,7 @@ export function ssoRoutes(ctx: RouteContext): void {
         method: 'SSO',
         status: 'failed',
         email: expiredProfile?.email,
-        userId: ws.users.findOneBy('email', expiredProfile?.email ?? '')?.id,
+        userId: findUserByEmail(ws, expiredProfile?.email ?? '')?.id,
         error: { code: error.code, message: error.message },
         ipAddress: c.req.header('x-forwarded-for') ?? null,
         userAgent: c.req.header('user-agent') ?? null,
@@ -229,13 +236,15 @@ export function ssoRoutes(ctx: RouteContext): void {
 
     store.setData(`${STORE_KEY_PREFIXES.ssoToken}${accessToken}`, profile.id);
 
-    // SSO is profile-based; a user-management user may not exist for this email
+    // SSO is profile-based; a user-management user may not exist for this email. Resolved
+    // case-insensitively, like every other lookup by email, so the event carries the id of an
+    // account stored under a different case rather than reporting none.
     emitAuthenticationEvent({
       eventBus: store.getData<EventBus>(STORE_KEYS.eventBus),
       method: 'SSO',
       status: 'succeeded',
       email: profile.email,
-      userId: ws.users.findOneBy('email', profile.email)?.id ?? null,
+      userId: findUserByEmail(ws, profile.email)?.id ?? null,
       ipAddress: c.req.header('x-forwarded-for') ?? null,
       userAgent: c.req.header('user-agent') ?? null,
       sso: {

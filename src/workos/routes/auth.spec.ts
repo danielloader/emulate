@@ -3,6 +3,7 @@ import { createServer, type ApiKeyMap } from '../../core/index.js';
 import { workosPlugin } from '../index.js';
 import { getWorkOSStore } from '../store.js';
 import { STORE_KEYS } from '../constants.js';
+import { hashPassword } from '../helpers.js';
 import type { Store } from '../../core/index.js';
 
 const apiKeys: ApiKeyMap = { sk_test_auth: { environment: 'test' } };
@@ -782,6 +783,212 @@ describe('Auth routes', () => {
     expect(res.status).toBe(200);
     const body = await json(res);
     expect(body.authentication_method).toBe('MagicAuth');
+  });
+
+  it('rejects a non-string email on magic auth creation', async () => {
+    const res = await req('/user_management/magic_auth', {
+      method: 'POST',
+      body: JSON.stringify({ email: 123 }),
+    });
+    expect(res.status).toBe(400);
+    const body = await json(res);
+    expect(body.code).toBe('invalid_request');
+    // Named for what it is. Routing this into the presence check reported "email is required" for
+    // an address that was supplied — the same backwards message the shape guard exists to avoid.
+    expect(body.message).toBe('email must be a string');
+  });
+
+  // Every one of these paths type-asserted `email` and then lowercased it to resolve the account
+  // case-insensitively, so a non-string arrived at `.toLowerCase()` and came back a 500 —
+  // `server_error` in a consumer's suite reads as an emulator defect, not a malformed request.
+  it('rejects a non-string email with 400 on every grant that resolves one', async () => {
+    const password = await app.request('/user_management/authenticate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ grant_type: 'password', email: 123, password: 'whatever' }),
+    });
+    expect(password.status).toBe(400);
+    expect((await json(password)).message).toBe('email must be a string');
+
+    const magic = await app.request('/user_management/authenticate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        grant_type: 'urn:workos:oauth:grant-type:magic-auth:code',
+        code: '123456',
+        email: { not: 'a string' },
+      }),
+    });
+    expect(magic.status).toBe(400);
+    expect((await json(magic)).message).toBe('email must be a string');
+  });
+
+  // Creation trims before storing, so a read that skipped the trim could not find the account
+  // creation had just written under the same address.
+  it('trims a padded address on the paths that resolve one', async () => {
+    const signup = await json(
+      await req('/user_management/magic_auth', {
+        method: 'POST',
+        body: JSON.stringify({ email: '  padded@x.test  ' }),
+      }),
+    );
+    expect(signup.email).toBe('padded@x.test');
+
+    getWorkOSStore(store).users.update(signup.user_id, { password_hash: hashPassword('pw') });
+    const password = await app.request('/user_management/authenticate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ grant_type: 'password', email: ' padded@x.test ', password: 'pw' }),
+    });
+    expect(password.status).toBe(200);
+
+    const reset = await req('/user_management/password_reset', {
+      method: 'POST',
+      body: JSON.stringify({ email: ' padded@x.test ' }),
+    });
+    expect(reset.status).toBe(201);
+  });
+
+  it('creates the user at magic auth code creation for an unknown email', async () => {
+    const magicRes = await req('/user_management/magic_auth', {
+      method: 'POST',
+      body: JSON.stringify({ email: 'signup@test.com' }),
+    });
+    expect(magicRes.status).toBe(201);
+    const magicBody = await json(magicRes);
+    expect(magicBody.user_id).toBeTruthy();
+
+    const usersRes = await req('/user_management/users?email=signup%40test.com');
+    const users = await json(usersRes);
+    expect(users.data).toHaveLength(1);
+    expect(users.data[0].id).toBe(magicBody.user_id);
+    expect(users.data[0].email_verified).toBe(false);
+  });
+
+  // A sign-up that creates a user is a sign-up a webhook consumer expects to hear about, which is
+  // a large part of why this endpoint creating one is useful to test against at all.
+  it('emits user.created for a sign-up, and none when the user already existed', async () => {
+    const ws = getWorkOSStore(store);
+    const created = () =>
+      ws.events.all().filter((e: { event: string; data: Record<string, unknown> }) => e.event === 'user.created');
+
+    const signup = await json(
+      await req('/user_management/magic_auth', { method: 'POST', body: JSON.stringify({ email: 'evented@test.com' }) }),
+    );
+    expect(created()).toHaveLength(1);
+    expect(created()[0].data).toMatchObject({ id: signup.user_id, email: 'evented@test.com', email_verified: false });
+
+    // A second code for the same address resolves the existing user, so nothing was created.
+    await req('/user_management/magic_auth', { method: 'POST', body: JSON.stringify({ email: 'evented@test.com' }) });
+    expect(created()).toHaveLength(1);
+  });
+
+  it('resolves an existing user case-insensitively instead of forking the account', async () => {
+    const first = await json(
+      await req('/user_management/magic_auth', {
+        method: 'POST',
+        body: JSON.stringify({ email: 'Casing@Test.com' }),
+      }),
+    );
+    const second = await json(
+      await req('/user_management/magic_auth', {
+        method: 'POST',
+        body: JSON.stringify({ email: 'casing@test.com' }),
+      }),
+    );
+
+    expect(second.user_id).toBe(first.user_id);
+    // Stored as first given — production preserves the case it was handed.
+    const users = getWorkOSStore(store).users.all();
+    expect(users).toHaveLength(1);
+    expect(users[0].email).toBe('Casing@Test.com');
+
+    // And the code is redeemable with the address it was requested for, not only the stored
+    // casing. Resolving the user case-insensitively while matching the code exactly would
+    // return a 201 carrying a code that this authenticate call could never spend.
+    const auth = await app.request('/user_management/authenticate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        grant_type: 'urn:workos:oauth:grant-type:magic-auth:code',
+        code: second.code,
+        email: 'casing@test.com',
+      }),
+    });
+    expect(auth.status).toBe(200);
+    expect((await json(auth)).user.id).toBe(first.user_id);
+  });
+
+  it('rejects an email that could only be a typo, rather than creating a ghost user', async () => {
+    for (const email of ['', '   ', 'not-an-email', 'a b@test.com', '@test.com', 'nope@']) {
+      const res = await req('/user_management/magic_auth', {
+        method: 'POST',
+        body: JSON.stringify({ email }),
+      });
+      expect(res.status).toBe(400);
+      expect((await json(res)).code).toBe('invalid_request');
+    }
+    expect(getWorkOSStore(store).users.all()).toHaveLength(0);
+  });
+
+  // Absent and malformed have the same fix only if the caller is told which one happened. `null`
+  // counts as absent — it is how a JSON body spells it, and both creation paths agree on that.
+  it('distinguishes a missing email from an unusable one', async () => {
+    for (const body of [{}, { email: null }]) {
+      const missing = await req('/user_management/magic_auth', { method: 'POST', body: JSON.stringify(body) });
+      expect(missing.status).toBe(400);
+      expect((await json(missing)).message).toBe('email is required');
+    }
+
+    const malformed = await req('/user_management/magic_auth', {
+      method: 'POST',
+      body: JSON.stringify({ email: 'not-an-email' }),
+    });
+    expect((await json(malformed)).message).toBe('email must be a valid email address');
+  });
+
+  // Magic Auth stores the case it was handed, so every other way in has to resolve that way too
+  // — otherwise a sign-up creates an account the rest of the API cannot reach.
+  it('reaches a Magic Auth account by any casing of its address', async () => {
+    await req('/user_management/magic_auth', { method: 'POST', body: JSON.stringify({ email: 'Mixed@Case.test' }) });
+    const user = getWorkOSStore(store).users.all()[0];
+    getWorkOSStore(store).users.update(user.id, { password_hash: hashPassword('correct horse') });
+
+    const password = await app.request('/user_management/authenticate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ grant_type: 'password', email: 'mixed@case.test', password: 'correct horse' }),
+    });
+    expect(password.status).toBe(200);
+    expect((await json(password)).user.id).toBe(user.id);
+
+    const reset = await req('/user_management/password_reset', {
+      method: 'POST',
+      body: JSON.stringify({ email: 'mixed@case.test' }),
+    });
+    expect(reset.status).toBe(201);
+  });
+
+  it('emits one user.updated per magic auth sign-in, and none for a no-op re-verify', async () => {
+    const ws = getWorkOSStore(store);
+    const countUpdates = () => ws.events.all().filter((e: { event: string }) => e.event === 'user.updated').length;
+
+    await signInWithMagicAuth('quiet@test.com');
+    const afterFirst = countUpdates();
+    // The sign-up login both verifies the email and stamps last_sign_in_at — one write.
+    expect(afterFirst).toBe(1);
+
+    await signInWithMagicAuth('quiet@test.com');
+    // The second login only stamps last_sign_in_at; email_verified is already true.
+    expect(countUpdates()).toBe(2);
+  });
+
+  it('magic auth sign-up verifies the email and yields an org-less session', async () => {
+    const res = await signInWithMagicAuth('signup2@test.com');
+    expect(res.status).toBe(200);
+    const body = await json(res);
+    expect(body.user.email_verified).toBe(true);
+    expect(decodeJwt(body.access_token).org_id).toBeUndefined();
   });
 
   // --- Device code tests ---

@@ -14,10 +14,12 @@ function createTestApp() {
 
 describe('SSO routes', () => {
   let app: ReturnType<typeof createTestApp>['app'];
+  let store: Store;
 
   beforeEach(() => {
     const server = createTestApp();
     app = server.app;
+    store = server.store;
   });
 
   const req = (path: string, init?: RequestInit) => app.request(path, { headers, ...init });
@@ -55,6 +57,54 @@ describe('SSO routes', () => {
     const url = new URL(location);
     expect(url.searchParams.get('code')).toBeTruthy();
     expect(url.searchParams.get('state')).toBe('abc');
+  });
+
+  // The last exact-match lookup by email. A login_hint differing only in case is the same
+  // federated person, so it reuses the profile rather than minting a second one for the same
+  // connection — which is the pair of records no lookup by email can tell apart, in profile form.
+  it('reuses one profile across casings of the same login_hint', async () => {
+    const { conn } = await createOrgWithConnection();
+
+    for (const hint of ['Person%40sso.example.com', 'person%40sso.example.com', 'PERSON%40SSO.EXAMPLE.COM']) {
+      const res = await app.request(
+        `/sso/authorize?connection=${conn.id}&redirect_uri=http://localhost:3000/callback&login_hint=${hint}`,
+      );
+      expect(res.status).toBe(302);
+    }
+
+    const profiles = getWorkOSStore(store).ssoProfiles.all();
+    expect(profiles).toHaveLength(1);
+    // Stored as first given, like every other address the emulator writes.
+    expect(profiles[0].email).toBe('Person@sso.example.com');
+  });
+
+  // Matching on the connection at the same time as the email, not after: `findOneBy` returned the
+  // first profile for the address whatever connection it belonged to, so the second connection
+  // never matched its own profile and minted another on every authorize.
+  it('keeps one profile per connection for the same address', async () => {
+    const { conn } = await createOrgWithConnection();
+    const org2 = await json(await req('/organizations', { method: 'POST', body: JSON.stringify({ name: 'Other' }) }));
+    const conn2 = await json(
+      await req('/connections', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: 'Other SSO',
+          organization_id: org2.id,
+          connection_type: 'GenericSAML',
+          domains: ['sso.example.com'],
+        }),
+      }),
+    );
+
+    for (const id of [conn.id, conn2.id, conn.id, conn2.id]) {
+      await app.request(
+        `/sso/authorize?connection=${id}&redirect_uri=http://localhost:3000/callback&login_hint=shared%40sso.example.com`,
+      );
+    }
+
+    const profiles = getWorkOSStore(store).ssoProfiles.all();
+    expect(profiles).toHaveLength(2);
+    expect(new Set(profiles.map((p) => p.connection_id))).toEqual(new Set([conn.id, conn2.id]));
   });
 
   it('sso token exchange returns profile and access_token', async () => {
@@ -289,6 +339,32 @@ describe('SSO authentication events', () => {
     });
     expect(event.data).toHaveProperty('user_id');
     expect(event.data).toHaveProperty('email');
+  });
+
+  // SSO is profile-based, so the event's user_id is resolved from the profile's email. Resolving it
+  // exactly reported user_id: null for an account that existed under a different case — and Magic
+  // Auth sign-up creates accounts under whatever case it was handed.
+  it('resolves the event user_id for an account stored under a different case', async () => {
+    const { conn } = await createOrgWithConnection();
+    const user = await json(
+      await req('/user_management/users', {
+        method: 'POST',
+        body: JSON.stringify({ email: 'Federated@SSO-Events.example.com' }),
+      }),
+    );
+
+    const authRes = await app.request(
+      `/sso/authorize?connection=${conn.id}&redirect_uri=http://localhost:3000/callback&login_hint=federated%40sso-events.example.com`,
+    );
+    const code = new URL(authRes.headers.get('location')!).searchParams.get('code')!;
+    await app.request('/sso/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ grant_type: 'authorization_code', code }),
+    });
+
+    const [event] = eventsNamed('authentication.sso_succeeded');
+    expect(event.data).toMatchObject({ user_id: user.id, email: 'federated@sso-events.example.com' });
   });
 
   it('emits authentication.sso_failed with an error object for an invalid code', async () => {
