@@ -1,7 +1,13 @@
 import type { Context } from 'hono';
 import { type RouteContext, parseJsonBody, WorkOSApiError, generateId } from '../../core/index.js';
 import { getWorkOSStore } from '../store.js';
-import { formatSSOProfile, expiresIn, isExpired, assertLocalRedirectUri, emitAuthenticationEvent } from '../helpers.js';
+import {
+  formatSSOProfile,
+  expiresIn,
+  isExpired,
+  assertAllowedRedirectUri,
+  emitAuthenticationEvent,
+} from '../helpers.js';
 import type { WorkOSConnection } from '../entities.js';
 import type { EventBus } from '../event-bus.js';
 import { STORE_KEY_PREFIXES, STORE_KEYS } from '../constants.js';
@@ -23,7 +29,7 @@ export function ssoRoutes(ctx: RouteContext): void {
   function resolveAndRedirect(c: any, params: SSOAuthorizeParams) {
     const { redirectUri, state, connectionId, organizationId, domainHint, email: loginHint } = params;
 
-    assertLocalRedirectUri(redirectUri);
+    assertAllowedRedirectUri(redirectUri, store);
 
     let connection: WorkOSConnection | undefined;
 
@@ -86,6 +92,11 @@ export function ssoRoutes(ctx: RouteContext): void {
     if (!redirectUri) {
       throw new WorkOSApiError(400, 'Missing required parameter: redirect_uri', 'invalid_request');
     }
+
+    // Checked before the interactive branch, which renders the redirect_uri into a hidden field
+    // and defers every check to the POST. A host the emulator will not redirect to should fail
+    // here, not after someone has filled the form in.
+    assertAllowedRedirectUri(redirectUri, store);
 
     const interactive = store.getData<boolean>(STORE_KEYS.interactiveAuth);
     if (interactive) {

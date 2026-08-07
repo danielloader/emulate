@@ -15,7 +15,7 @@ import {
   verifyPassword,
   isExpired,
   expiresIn,
-  assertLocalRedirectUri,
+  assertAllowedRedirectUri,
   sealSession,
   AUTH_METHOD_SESSION_VALUES,
   resolveResponseAuthMethod,
@@ -67,7 +67,7 @@ export function authRoutes(ctx: RouteContext): void {
   function resolveAndRedirect(c: any, params: AuthorizeParams) {
     const { redirectUri, state, codeChallenge, codeChallengeMethod, loginHint, clientId } = params;
 
-    assertLocalRedirectUri(redirectUri);
+    assertAllowedRedirectUri(redirectUri, store);
 
     let user;
     if (loginHint) {
@@ -119,6 +119,11 @@ export function authRoutes(ctx: RouteContext): void {
     if (!redirectUri) {
       throw new WorkOSApiError(400, 'redirect_uri is required', 'invalid_request');
     }
+
+    // Checked before the interactive branch, which renders the redirect_uri into a hidden field
+    // and defers every check to the POST. A host the emulator will not redirect to should fail
+    // here, not after someone has filled the form in.
+    assertAllowedRedirectUri(redirectUri, store);
 
     const interactive = store.getData<boolean>(STORE_KEYS.interactiveAuth);
     if (interactive) {
