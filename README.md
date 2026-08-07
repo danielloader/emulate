@@ -514,7 +514,25 @@ Only `active` memberships count — an unaccepted invitation or a deactivated me
 
 ### Refresh tokens always rotate
 
-The emulator issues a new refresh token on every refresh and invalidates the one you presented, so replaying it returns `invalid_grant`. WorkOS documents that refresh tokens _may_ be rotated after use, so production is free to hand back the same token and leave it valid. The emulator always takes the stricter path: a client that forgets to store the newly returned `refresh_token` fails locally instead of in production.
+The emulator issues a new refresh token on every refresh and invalidates the one you presented, so replaying it returns `{"error": "invalid_grant", "error_description": "Invalid refresh token."}`. WorkOS documents that refresh tokens _may_ be rotated after use, so production is free to hand back the same token and leave it valid. The emulator always takes the stricter path: a client that forgets to store the newly returned `refresh_token` fails locally instead of in production.
+
+### Authentication failure shapes
+
+`POST /user_management/authenticate` does not use one error shape for every failure. Which shape you get depends on the failure, not only on the grant: any malformed request is OAuth-shaped, and among credential failures three grants are OAuth-shaped and the rest plain.
+
+| Failure                                                          | Body                                                                  | Node SDK raises           |
+| ---------------------------------------------------------------- | --------------------------------------------------------------------- | ------------------------- |
+| Malformed request — missing or unrecognized parameter, any grant | `{"error": "invalid_request", "error_description": "…"}`              | `OauthException`          |
+| `authorization_code` — unknown, expired, bad verifier, user gone | `{"error": "invalid_grant", "error_description": "…"}`                | `OauthException`          |
+| `refresh_token` — unknown, expired, rotated, or user deleted     | `{"error": "invalid_grant", "error_description": "…"}`                | `OauthException`          |
+| Device code — pending, expired, unknown, or user deleted         | `{"error": "authorization_pending\|expired_token\|invalid_grant", …}` | `OauthException`          |
+| `password` — wrong password                                      | `{"code": "invalid_credentials", "message": "…"}` (400)               | `GenericServerException`  |
+| Magic Auth — wrong or expired code                               | `{"code": "invalid_one_time_code\|one_time_code_expired", …}`         | `GenericServerException`  |
+| Step-up (MFA, org selection, email verification)                 | `{"code": "…", "message": "…"}` (403)                                 | `AuthenticationException` |
+
+`password` is an RFC 6749 grant, but production fails its credentials with the plain shape, so the emulator does too — while a `password` request that omits a parameter still answers `invalid_request` OAuth-style. Both halves come from the spec, whose authenticate 400 lists `invalid_request` and `invalid_grant` only as `{error, error_description}` and `invalid_credentials` and the one-time-code errors only as `{code, message}`. An unrecognized `grant_type` is reported as `invalid_request` rather than `unsupported_grant_type`, which the spec gives to `/sso/token` alone.
+
+`/sso/token` is OAuth-shaped throughout, matching its spec definition.
 
 ### Emitted events
 
@@ -743,6 +761,12 @@ Notes:
 ## Error Hooks
 
 Error hooks let you force the emulator to return non-200 responses so you can test how your app handles WorkOS API failures (422, 500, etc.).
+
+`@workos/emulate/core` exports the two error classes the emulator itself throws, for hooks that need to
+raise a failure rather than describe one: `WorkOSApiError(status, message, code)` renders the plain
+`{code, message}` envelope, and `OauthApiError(status, error, description)` the RFC 6749
+`{error, error_description}` one used by `/sso/token`, `/oauth2/token` and the OAuth-shaped
+`authenticate` grants (see [Authentication failure shapes](#authentication-failure-shapes)).
 
 ### Seed config
 
