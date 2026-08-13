@@ -847,11 +847,11 @@ export function formatRoleAssignment(ra: WorkOSRoleAssignment): Record<string, u
   return formatEntity(ra);
 }
 
-export function formatDeviceAuthorization(d: WorkOSDeviceAuthorization): Record<string, unknown> {
+export function formatDeviceAuthorization(d: WorkOSDeviceAuthorization, baseUrl: string): Record<string, unknown> {
   return {
     device_code: d.device_code,
     user_code: d.user_code,
-    verification_uri: 'http://localhost:0/user_management/authorize/device/verify',
+    verification_uri: `${baseUrl}/user_management/authorize/device/verify`,
     expires_in: Math.max(0, Math.floor((new Date(d.expires_at).getTime() - Date.now()) / 1000)),
     interval: d.interval,
   };

@@ -5,7 +5,7 @@ import { JWTManager, type SigningKeyOptions } from './jwt.js';
 import { createApiErrorHandler, requestIdMiddleware } from './middleware/error-handler.js';
 import { authMiddleware, type ApiKeyMap, type WorkOSAppEnv } from './middleware/auth.js';
 import { errorHooksMiddleware } from './error-hooks.js';
-import type { ServicePlugin } from './plugin.js';
+import type { ServicePlugin, RouteContext } from './plugin.js';
 
 export interface ServerOptions {
   port?: number;
@@ -29,6 +29,11 @@ export function createServer(plugin: ServicePlugin, options: ServerOptions = {})
   const store = new Store();
   const jwt = new JWTManager(options.issuer ?? baseUrl, options.signingKey);
 
+  // Mutable so createEmulator can reassign it to the actual bound URL after listen() resolves
+  // an ephemeral port (port: 0). Route handlers read `ctx.baseUrl` per-request rather than
+  // destructuring it, so a post-bind reassignment takes effect for them.
+  const ctx: RouteContext = { app, store, jwt, baseUrl };
+
   const apiKeys: ApiKeyMap = options.apiKeys ?? {
     sk_test_default: { environment: 'test' },
   };
@@ -48,6 +53,9 @@ export function createServer(plugin: ServicePlugin, options: ServerOptions = {})
   const PUBLIC_PATHS = new Set([
     '/health',
     '/user_management/authorize',
+    // Browser-facing device verification page; like the authorize login page it cannot carry a
+    // bearer token, so it is public. The POST device-authorization endpoint still requires auth.
+    '/user_management/authorize/device/verify',
     '/user_management/authenticate',
     '/user_management/sessions/logout',
   ]);
@@ -127,7 +135,7 @@ export function createServer(plugin: ServicePlugin, options: ServerOptions = {})
   store.setData('apiKeyMap', apiKeys);
 
   // Register plugin routes
-  plugin.register({ app, store, jwt, baseUrl });
+  plugin.register(ctx);
 
   // Not found handler
   app.notFound((c) =>
@@ -140,5 +148,5 @@ export function createServer(plugin: ServicePlugin, options: ServerOptions = {})
     ),
   );
 
-  return { app, store, jwt, port, baseUrl };
+  return { app, store, jwt, port, baseUrl, ctx };
 }
