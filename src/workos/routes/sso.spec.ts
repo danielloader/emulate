@@ -629,15 +629,50 @@ describe('OIDC discovery', () => {
   });
 
   it('advertises the issuer it actually mints, so a client can validate iss against it', async () => {
-    const { app } = createTestApp();
+    const { app, store } = createTestApp();
+    const ws = getWorkOSStore(store);
+
+    ws.users.insert({
+      object: 'user',
+      name: null,
+      email: 'discovery@test.com',
+      first_name: null,
+      last_name: null,
+      email_verified: true,
+      profile_picture_url: null,
+      last_sign_in_at: null,
+      external_id: null,
+      metadata: {},
+      locale: null,
+      password_hash: null,
+      impersonator: null,
+    });
 
     const doc = (await (
       await app.request('/user_management/client_01EXAMPLE/.well-known/openid-configuration')
     ).json()) as Record<string, string>;
 
-    const jwks = await (await app.request('/sso/jwks/client_01EXAMPLE')).json();
-    expect(jwks).toHaveProperty('keys');
-    expect(typeof doc.issuer).toBe('string');
-    expect(doc.issuer.length).toBeGreaterThan(0);
+    // Mint a real token through the flow the document advertises, rather than trusting the
+    // document about itself: a client fetches discovery precisely to validate `iss`, so the two
+    // drifting apart is the failure worth catching.
+    const authorize = await app.request(
+      '/user_management/authorize?redirect_uri=http://localhost:3000/callback&client_id=client_01EXAMPLE',
+    );
+    const code = new URL(authorize.headers.get('location')!).searchParams.get('code')!;
+    const token = (await (
+      await app.request('/user_management/authenticate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ grant_type: 'authorization_code', code, client_id: 'client_01EXAMPLE' }),
+      })
+    ).json()) as { access_token: string };
+
+    const claims = JSON.parse(Buffer.from(token.access_token.split('.')[1]!, 'base64url').toString()) as Record<
+      string,
+      string
+    >;
+
+    expect(claims.iss).toBe(doc.issuer);
+    expect(claims.aud).toBe('client_01EXAMPLE');
   });
 });
