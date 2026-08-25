@@ -604,7 +604,17 @@ export function authRoutes(ctx: RouteContext): void {
             new OauthApiError(400, 'invalid_grant', `The code '${code}' has expired or is invalid.`),
           );
         }
-        organizationId = authCode.organization_id;
+        // A code outlives the membership that justified it easily enough: ten minutes is long
+        // enough for one to be deactivated or deleted in between. Trusting the stored
+        // organization would issue a session, tokens, a role and permissions for an
+        // organization the user no longer actively belongs to, so it is dropped and the
+        // resolution below runs as though the code had never carried one, which is what every
+        // other grant does.
+        organizationId =
+          authCode.organization_id &&
+          activeOrganizationsFor(authCode.user_id).some((o) => o.id === authCode.organization_id)
+            ? authCode.organization_id
+            : null;
         // Bind the token's client_id to the authorization grant, not the unvalidated
         // redemption-time request parameter.
         grantClientId = authCode.client_id ?? undefined;

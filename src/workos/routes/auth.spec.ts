@@ -2376,6 +2376,42 @@ describe('AuthKit interactive auth', () => {
     expect(ws.authCodes.findOneBy('code', code)?.organization_id).toBe(chosen.id);
   });
 
+  it('drops a code\u2019s organization when the membership is revoked before redemption', async () => {
+    const ws = getWorkOSStore(store);
+    const user = seedUser(ws, 'revoked@test.com');
+    const org = joinOrg(user.id, 'Acme');
+
+    const authorize = await app.request('/user_management/authorize', {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        redirect_uri: 'http://localhost:3000/callback',
+        email: 'revoked@test.com',
+        organization_id: org.id,
+      }),
+    });
+    const code = new URL(authorize.headers.get('location')!).searchParams.get('code')!;
+
+    // Revoked inside the code's ten minute window, which is the whole point: the code still
+    // names the organization.
+    const membership = ws.organizationMemberships.findBy('user_id', user.id)[0]!;
+    const deactivated = await app.request(`/user_management/organization_memberships/${membership.id}/deactivate`, {
+      method: 'PUT',
+      headers,
+    });
+    expect(deactivated.status).toBe(200);
+
+    const res = await app.request('/user_management/authenticate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ grant_type: 'authorization_code', code }),
+    });
+
+    expect(res.status).toBe(200);
+    // Not scoped to the organization the code named, because the membership behind it is gone.
+    expect((await json(res)).organization_id).not.toBe(org.id);
+  });
+
   it('POST /user_management/authorize refuses an organization the user is not in', async () => {
     const ws = getWorkOSStore(store);
     seedUser(ws, 'outsider@test.com');
