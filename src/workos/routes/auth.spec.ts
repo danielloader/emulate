@@ -2200,6 +2200,23 @@ describe('AuthKit interactive auth', () => {
 
   const json = (res: Response) => res.json() as Promise<any>;
 
+  const seedUser = (ws: ReturnType<typeof getWorkOSStore>, email: string) =>
+    ws.users.insert({
+      object: 'user',
+      name: null,
+      email,
+      first_name: null,
+      last_name: null,
+      email_verified: false,
+      profile_picture_url: null,
+      last_sign_in_at: null,
+      external_id: null,
+      metadata: {},
+      locale: null,
+      password_hash: null,
+      impersonator: null,
+    });
+
   it('GET /user_management/authorize returns HTML login page', async () => {
     const ws = getWorkOSStore(store);
     ws.users.insert({
@@ -2225,6 +2242,93 @@ describe('AuthKit interactive auth', () => {
     expect(html).toContain('<form');
     expect(html).toContain('name="email"');
     expect(html).toContain('name="redirect_uri"');
+  });
+
+  it('POST /user_management/authorize asks which organization when a user has several', async () => {
+    const ws = getWorkOSStore(store);
+    const user = seedUser(ws, 'multi@test.com');
+    for (const name of ['Acme', 'Beta']) {
+      const org = ws.organizations.insert({
+        object: 'organization',
+        name,
+        external_id: null,
+        stripe_customer_id: null,
+        metadata: {},
+      } as any);
+      ws.organizationMemberships.insert({
+        object: 'organization_membership',
+        user_id: user.id,
+        organization_id: org.id,
+        role: { slug: 'member' },
+        status: 'active',
+        external_id: null,
+        metadata: {},
+      } as any);
+    }
+
+    const res = await app.request('/user_management/authorize', {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ redirect_uri: 'http://localhost:3000/callback', email: 'multi@test.com' }),
+    });
+
+    // A page, not a redirect: production asks here rather than handing the client
+    // organization_selection_required at the exchange, which a browser cannot act on.
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain('Select an organization');
+    expect(html).toContain('name="organization_id"');
+    expect(html).toContain('Acme');
+    expect(html).toContain('Beta');
+  });
+
+  it('POST /user_management/authorize mints a code scoped to the chosen organization', async () => {
+    const ws = getWorkOSStore(store);
+    const user = seedUser(ws, 'multi2@test.com');
+    const chosen = ws.organizations.insert({
+      object: 'organization',
+      name: 'Chosen',
+      external_id: null,
+      stripe_customer_id: null,
+      metadata: {},
+    } as any);
+    ws.organizationMemberships.insert({
+      object: 'organization_membership',
+      user_id: user.id,
+      organization_id: chosen.id,
+      role: { slug: 'member' },
+      status: 'active',
+      external_id: null,
+      metadata: {},
+    } as any);
+
+    const res = await app.request('/user_management/authorize', {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        redirect_uri: 'http://localhost:3000/callback',
+        email: 'multi2@test.com',
+        organization_id: chosen.id,
+      }),
+    });
+
+    expect(res.status).toBe(302);
+    const code = new URL(res.headers.get('location')!).searchParams.get('code')!;
+    expect(ws.authCodes.findOneBy('code', code)?.organization_id).toBe(chosen.id);
+  });
+
+  it('POST /user_management/authorize redirects straight through for a single-organization user', async () => {
+    const ws = getWorkOSStore(store);
+    seedUser(ws, 'single@test.com');
+
+    const res = await app.request('/user_management/authorize', {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ redirect_uri: 'http://localhost:3000/callback', email: 'single@test.com' }),
+    });
+
+    expect(res.status).toBe(302);
+    expect(res.headers.get('location')).toContain('code=');
   });
 
   it('GET /user_management/authorize pre-fills login_hint', async () => {
