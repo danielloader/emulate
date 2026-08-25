@@ -112,6 +112,18 @@ export function authRoutes(ctx: RouteContext): void {
       return c.redirect(redirect.toString());
     }
 
+    // A caller-supplied organization only means anything if the user is actually in it. Minting
+    // a code for one they are not a member of would put that org_id on the token with no role or
+    // permissions behind it, which is a session no membership justifies and, for anything
+    // authorizing on org_id, the wrong tenant entirely.
+    if (organizationId && !activeOrganizationsFor(user.id).some((o) => o.id === organizationId)) {
+      throw new WorkOSApiError(
+        400,
+        `User is not an active member of organization ${organizationId}`,
+        'invalid_request',
+      );
+    }
+
     // Hosted AuthKit asks which organization here, before it mints anything, so the client's
     // exchange always succeeds. Resolving it at the exchange instead would answer a browser
     // client with organization_selection_required, which it cannot act on mid-callback.

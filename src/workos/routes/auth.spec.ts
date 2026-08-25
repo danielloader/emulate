@@ -2381,6 +2381,51 @@ describe('AuthKit interactive auth', () => {
     expect(ws.authCodes.findOneBy('code', code)?.organization_id).toBe(chosen.id);
   });
 
+  it('POST /user_management/authorize refuses an organization the user is not in', async () => {
+    const ws = getWorkOSStore(store);
+    seedUser(ws, 'outsider@test.com');
+    const other = ws.organizations.insert({
+      object: 'organization',
+      name: 'Someone Else',
+      external_id: null,
+      stripe_customer_id: null,
+      metadata: {},
+    } as any);
+
+    const res = await app.request('/user_management/authorize', {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        redirect_uri: 'http://localhost:3000/callback',
+        email: 'outsider@test.com',
+        organization_id: other.id,
+      }),
+    });
+
+    // Not a redirect: a code scoped to an organization with no membership behind it puts that
+    // org_id on the token with no role or permissions, which is the wrong tenant for anything
+    // authorizing on it.
+    expect(res.status).toBe(400);
+    expect((await json(res)).code).toBe('invalid_request');
+  });
+
+  it('POST /user_management/authorize refuses an organization that does not exist', async () => {
+    const ws = getWorkOSStore(store);
+    seedUser(ws, 'nobody@test.com');
+
+    const res = await app.request('/user_management/authorize', {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        redirect_uri: 'http://localhost:3000/callback',
+        email: 'nobody@test.com',
+        organization_id: 'org_does_not_exist',
+      }),
+    });
+
+    expect(res.status).toBe(400);
+  });
+
   it('POST /user_management/authorize redirects straight through for a single-organization user', async () => {
     const ws = getWorkOSStore(store);
     seedUser(ws, 'single@test.com');
