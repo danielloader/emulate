@@ -1151,19 +1151,43 @@ const emulator = await createEmulator({
 
 ### What changes
 
-| Endpoint                         | Default (auto)                                   | Interactive                                   |
-| -------------------------------- | ------------------------------------------------ | --------------------------------------------- |
-| `GET /sso/authorize`             | Immediately redirects to callback with auth code | Serves an HTML login page with an email field |
-| `GET /user_management/authorize` | Immediately redirects to callback with auth code | Serves an HTML login page with an email field |
+| Endpoint                         | Default (auto)                                   | Interactive                                                                                             |
+| -------------------------------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------- |
+| `GET /sso/authorize`             | Immediately redirects to callback with auth code | Serves an HTML login page with an email field                                                           |
+| `GET /user_management/authorize` | Immediately redirects to callback with auth code | Serves an HTML login page with an email field, plus a collapsed list of the accounts the emulator holds |
 
 When interactive mode is on:
 
 1. Your app redirects to `/sso/authorize?connection=...&redirect_uri=...` (or `/user_management/authorize?...`)
 2. The emulator serves a login page instead of auto-redirecting
 3. The browser (or agent) fills in the email field and submits the form
-4. The emulator creates an auth code and redirects back to your app's callback URL
+4. If the user belongs to more than one organization, the emulator asks which one, as hosted AuthKit does
+5. The emulator creates an auth code and redirects back to your app's callback URL
 
 The `login_hint` parameter pre-fills the email field, so agent browsers can skip typing if desired.
+
+### Picking an account
+
+The login page also lists every account the emulator holds, collapsed behind **Pick an account (N)** and ordered by email, so a test does not have to hard-code an address to sign in as one. Each row submits directly. A user created through the API mid-session appears in the list too. Typing an address that was never seeded still works, which is what sign-up flows rely on.
+
+### Choosing an organization
+
+A user with more than one active membership gets a second page, one row per organization, before any code is minted. This mirrors hosted AuthKit, and it matters because the alternative is the API-level `organization_selection_required` response, which a browser client receives mid-callback and cannot act on.
+
+Skip the page by passing `organization_id` to `/user_management/authorize`; it must be one the user is an active member of, or the request is refused. If the membership behind a code is revoked before the code is redeemed, redemption fails with `invalid_grant` rather than silently signing the user into a different tenant.
+
+```ts
+test('multi-organization login', async ({ page }) => {
+  await page.goto('http://localhost:3000/login');
+  await page.fill('input[name="email"]', 'alice@example.com');
+  await page.click('button[type="submit"]');
+
+  // Only shown when the user belongs to several organizations
+  await page.click('text=Acme');
+
+  await expect(page).toHaveURL(/dashboard/);
+});
+```
 
 ### E2E example with Playwright
 
