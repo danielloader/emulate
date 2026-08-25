@@ -318,6 +318,32 @@ export function ssoRoutes(ctx: RouteContext): void {
   app.get('/sso/jwks', jwks);
   app.get('/sso/jwks/:clientId', jwks);
 
+  /**
+   * OIDC discovery, which production serves per AuthKit client at
+   * `/user_management/{client_id}/.well-known/openid-configuration`. Unauthenticated, as it is
+   * upstream: a client fetches it before it holds anything.
+   *
+   * `issuer` is the emulator's configured issuer rather than production's
+   * `{base}/user_management/{client_id}`, because it has to match the `iss` the emulator
+   * actually mints or a client validating one against the other rejects every token. Production
+   * can derive it per client; the emulator has a single issuer and reports that.
+   *
+   * The client id is not checked, which production does do, returning `entity_not_found`. The
+   * emulator has no registry of AuthKit clients — authorize accepts any `client_id` and
+   * `/sso/jwks/:clientId` serves any id — so refusing here alone would only break callers using
+   * a made-up id everywhere else.
+   */
+  app.get('/user_management/:clientId/.well-known/openid-configuration', (c) => {
+    const clientId = c.req.param('clientId');
+    return c.json({
+      issuer: jwt.issuer,
+      authorization_endpoint: `${ctx.baseUrl}/user_management/authorize`,
+      token_endpoint: `${ctx.baseUrl}/user_management/authenticate`,
+      response_types_supported: ['code'],
+      jwks_uri: `${ctx.baseUrl}/sso/jwks/${clientId}`,
+    });
+  });
+
   // SSO Single Logout — generate logout token
   app.post('/sso/logout/authorize', async (c) => {
     const body = await parseJsonBody(c);

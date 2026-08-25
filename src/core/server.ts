@@ -70,11 +70,16 @@ export function createServer(plugin: ServicePlugin, options: ServerOptions = {})
     '/_emulate/',
   ];
 
+  // OIDC discovery is per AuthKit client, so the path carries an id and cannot be matched
+  // exactly. Public upstream, since a client fetches it before it holds any credential.
+  const OPENID_CONFIGURATION = /^\/user_management\/[^/]+\/\.well-known\/openid-configuration$/;
+
   app.use('*', async (c, next) => {
     const path = new URL(c.req.url).pathname;
 
     // Skip auth for public paths
     if (PUBLIC_PATHS.has(path)) return next();
+    if (OPENID_CONFIGURATION.test(path)) return next();
     for (const prefix of PUBLIC_PATH_PREFIXES) {
       if (path.startsWith(prefix)) {
         // data-integrations: only /authorize subpath is public

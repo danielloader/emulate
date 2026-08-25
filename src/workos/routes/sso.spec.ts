@@ -606,3 +606,38 @@ describe('SSO authentication events', () => {
     expect(await res.json()).toEqual({ success: true });
   });
 });
+
+describe('OIDC discovery', () => {
+  it('serves the document unauthenticated, shaped as production does', async () => {
+    const { app } = createTestApp();
+
+    const res = await app.request(
+      '/user_management/client_01EXAMPLE/.well-known/openid-configuration',
+      // deliberately no Authorization header
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(Object.keys(body).sort()).toEqual(
+      ['authorization_endpoint', 'issuer', 'jwks_uri', 'response_types_supported', 'token_endpoint'].sort(),
+    );
+    expect(body.response_types_supported).toEqual(['code']);
+    expect(body.authorization_endpoint).toMatch(/\/user_management\/authorize$/);
+    expect(body.token_endpoint).toMatch(/\/user_management\/authenticate$/);
+    // Per client, like production's.
+    expect(body.jwks_uri).toMatch(/\/sso\/jwks\/client_01EXAMPLE$/);
+  });
+
+  it('advertises the issuer it actually mints, so a client can validate iss against it', async () => {
+    const { app } = createTestApp();
+
+    const doc = (await (
+      await app.request('/user_management/client_01EXAMPLE/.well-known/openid-configuration')
+    ).json()) as Record<string, string>;
+
+    const jwks = await (await app.request('/sso/jwks/client_01EXAMPLE')).json();
+    expect(jwks).toHaveProperty('keys');
+    expect(typeof doc.issuer).toBe('string');
+    expect(doc.issuer.length).toBeGreaterThan(0);
+  });
+});
