@@ -174,6 +174,7 @@ export function authRoutes(ctx: RouteContext): void {
     const codeChallengeMethod = url.searchParams.get('code_challenge_method');
     const loginHint = url.searchParams.get('login_hint');
     const clientId = url.searchParams.get('client_id');
+    const organizationId = url.searchParams.get('organization_id');
 
     if (!redirectUri) {
       throw new WorkOSApiError(400, 'redirect_uri is required', 'invalid_request');
@@ -191,6 +192,9 @@ export function authRoutes(ctx: RouteContext): void {
       if (codeChallenge) hiddenFields.code_challenge = codeChallenge;
       if (codeChallengeMethod) hiddenFields.code_challenge_method = codeChallengeMethod;
       if (clientId) hiddenFields.client_id = clientId;
+      // Carried through the login page so a caller that already knows the organization skips
+      // the selection page after the POST, rather than losing the GET's pre-selection here.
+      if (organizationId) hiddenFields.organization_id = organizationId;
 
       return c.html(
         renderLoginPage({
@@ -214,7 +218,7 @@ export function authRoutes(ctx: RouteContext): void {
       codeChallengeMethod,
       loginHint,
       clientId,
-      organizationId: url.searchParams.get('organization_id'),
+      organizationId,
     });
   });
 

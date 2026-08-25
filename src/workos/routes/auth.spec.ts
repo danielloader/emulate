@@ -2429,6 +2429,36 @@ describe('AuthKit interactive auth', () => {
     expect(res.headers.get('location')).toContain('code=');
   });
 
+  it('GET /user_management/authorize carries organization_id through the login page, skipping the selection page', async () => {
+    const ws = getWorkOSStore(store);
+    const user = seedUser(ws, 'preset@test.com');
+    const chosen = joinOrg(user.id, 'Preset Org');
+    joinOrg(user.id, 'Other Org');
+
+    // A caller that already knows the organization pins it on the GET. It must travel through the
+    // login page as a hidden field so the POST can mint a scoped code without stopping on the
+    // selection page — even though this user belongs to several organizations.
+    const page = await app.request(
+      `/user_management/authorize?redirect_uri=http://localhost:3000/callback&login_hint=preset@test.com&organization_id=${chosen.id}`,
+    );
+    const html = await page.text();
+    expect(html).toContain(`name="organization_id" value="${chosen.id}"`);
+
+    const res = await app.request('/user_management/authorize', {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        redirect_uri: 'http://localhost:3000/callback',
+        email: 'preset@test.com',
+        organization_id: chosen.id,
+      }),
+    });
+
+    expect(res.status).toBe(302);
+    const code = new URL(res.headers.get('location')!).searchParams.get('code')!;
+    expect(ws.authCodes.findOneBy('code', code)?.organization_id).toBe(chosen.id);
+  });
+
   it('GET /user_management/authorize pre-fills login_hint', async () => {
     const res = await app.request(
       '/user_management/authorize?redirect_uri=http://localhost:3000/callback&login_hint=bob@test.com',
