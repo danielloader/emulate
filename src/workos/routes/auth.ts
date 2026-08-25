@@ -33,7 +33,7 @@ import { renderConfiguredJwtTemplate } from '../jwt-template.js';
 import type { EventBus } from '../event-bus.js';
 import type { WorkOSInvitation, WorkOSSSOAuthorization, WorkOSUser } from '../entities.js';
 import { STORE_KEYS, STORE_KEY_PREFIXES } from '../constants.js';
-import { renderLoginPage, renderDeviceVerifyPage } from '../login-page.js';
+import { renderLoginPage, renderDeviceVerifyPage, renderOrganizationSelectPage } from '../login-page.js';
 
 interface PendingAuth {
   user_id: string;
@@ -62,14 +62,30 @@ interface AuthorizeParams {
   codeChallengeMethod: string | null;
   loginHint: string | null;
   clientId: string | null;
+  /** Which organization the session should be scoped to, when the caller already knows. */
+  organizationId: string | null;
 }
 
 export function authRoutes(ctx: RouteContext): void {
   const { app, store, jwt } = ctx;
   const ws = getWorkOSStore(store);
 
+  /**
+   * The organizations a session could be scoped to. 'pending' is an unaccepted invitation and
+   * 'inactive' a deactivated member; neither is one production would scope a session to.
+   */
+  function activeOrganizationsFor(userId: string): Array<{ id: string; name: string }> {
+    const orgs: Array<{ id: string; name: string }> = [];
+    for (const m of ws.organizationMemberships.findBy('user_id', userId)) {
+      if (m.status !== 'active') continue;
+      const org = ws.organizations.get(m.organization_id);
+      if (org) orgs.push({ id: org.id, name: org.name });
+    }
+    return orgs;
+  }
+
   function resolveAndRedirect(c: any, params: AuthorizeParams) {
-    const { redirectUri, state, codeChallenge, codeChallengeMethod, loginHint, clientId } = params;
+    const { redirectUri, state, codeChallenge, codeChallengeMethod, loginHint, clientId, organizationId } = params;
 
     assertAllowedRedirectUri(redirectUri, store);
 
@@ -96,9 +112,46 @@ export function authRoutes(ctx: RouteContext): void {
       return c.redirect(redirect.toString());
     }
 
+    // A caller-supplied organization only means anything if the user is actually in it. Minting
+    // a code for one they are not a member of would put that org_id on the token with no role or
+    // permissions behind it, which is a session no membership justifies and, for anything
+    // authorizing on org_id, the wrong tenant entirely.
+    if (organizationId && !activeOrganizationsFor(user.id).some((o) => o.id === organizationId)) {
+      throw new WorkOSApiError(
+        400,
+        `User is not an active member of organization ${organizationId}`,
+        'invalid_request',
+      );
+    }
+
+    // Hosted AuthKit asks which organization here, before it mints anything, so the client's
+    // exchange always succeeds. Resolving it at the exchange instead would answer a browser
+    // client with organization_selection_required, which it cannot act on mid-callback.
+    // Interactive only: a headless caller drives the documented API and handles that response
+    // itself, and this is the one mode that can put a page in front of a human.
+    if (!organizationId && store.getData<boolean>(STORE_KEYS.interactiveAuth)) {
+      const selectable = activeOrganizationsFor(user.id);
+      if (selectable.length > 1) {
+        const hiddenFields: Record<string, string> = { redirect_uri: redirectUri, email: user.email };
+        if (state) hiddenFields.state = state;
+        if (codeChallenge) hiddenFields.code_challenge = codeChallenge;
+        if (codeChallengeMethod) hiddenFields.code_challenge_method = codeChallengeMethod;
+        if (clientId) hiddenFields.client_id = clientId;
+
+        return c.html(
+          renderOrganizationSelectPage({
+            email: user.email,
+            organizations: selectable,
+            formAction: '/user_management/authorize',
+            hiddenFields,
+          }),
+        );
+      }
+    }
+
     const authCode = ws.authCodes.insert({
       user_id: user.id,
-      organization_id: null,
+      organization_id: organizationId,
       code: generateId('auth_code'),
       redirect_uri: redirectUri,
       expires_at: expiresIn(10),
@@ -121,6 +174,7 @@ export function authRoutes(ctx: RouteContext): void {
     const codeChallengeMethod = url.searchParams.get('code_challenge_method');
     const loginHint = url.searchParams.get('login_hint');
     const clientId = url.searchParams.get('client_id');
+    const organizationId = url.searchParams.get('organization_id');
 
     if (!redirectUri) {
       throw new WorkOSApiError(400, 'redirect_uri is required', 'invalid_request');
@@ -138,6 +192,9 @@ export function authRoutes(ctx: RouteContext): void {
       if (codeChallenge) hiddenFields.code_challenge = codeChallenge;
       if (codeChallengeMethod) hiddenFields.code_challenge_method = codeChallengeMethod;
       if (clientId) hiddenFields.client_id = clientId;
+      // Carried through the login page so a caller that already knows the organization skips
+      // the selection page after the POST, rather than losing the GET's pre-selection here.
+      if (organizationId) hiddenFields.organization_id = organizationId;
 
       return c.html(
         renderLoginPage({
@@ -146,11 +203,23 @@ export function authRoutes(ctx: RouteContext): void {
           emailHint: loginHint ?? undefined,
           formAction: '/user_management/authorize',
           hiddenFields,
+          // Every user the emulator holds, seeded or created through the API since; the page
+          // sorts them. Behind --interactive, and the same list is already readable from
+          // GET /user_management/users, so this discloses nothing it did not already hand out.
+          users: ws.users.all().map((u) => ({ email: u.email, name: u.name })),
         }),
       );
     }
 
-    return resolveAndRedirect(c, { redirectUri, state, codeChallenge, codeChallengeMethod, loginHint, clientId });
+    return resolveAndRedirect(c, {
+      redirectUri,
+      state,
+      codeChallenge,
+      codeChallengeMethod,
+      loginHint,
+      clientId,
+      organizationId,
+    });
   });
 
   app.post('/user_management/authorize', async (c) => {
@@ -167,6 +236,7 @@ export function authRoutes(ctx: RouteContext): void {
       codeChallengeMethod: (form.code_challenge_method as string) ?? null,
       loginHint: (form.email as string) ?? null,
       clientId: (form.client_id as string) ?? null,
+      organizationId: (form.organization_id as string) ?? null,
     });
   });
 
@@ -531,6 +601,27 @@ export function authRoutes(ctx: RouteContext): void {
           failAuth(
             'OAuth',
             { userId: authCode.user_id },
+            new OauthApiError(400, 'invalid_grant', `The code '${code}' has expired or is invalid.`),
+          );
+        }
+        // A code outlives the membership that justified it easily enough: ten minutes is long
+        // enough for one to be revoked in between. Neither obvious response is right. Trusting
+        // the stored organization issues a session, tokens, a role and permissions for one the
+        // user no longer belongs to. Clearing it and re-resolving is worse in a quieter way: a
+        // user left with exactly one other membership is signed into that tenant instead,
+        // without being told, having picked the first.
+        //
+        // So the grant fails. Its premise is gone, and the client's move is to authorize again,
+        // where the selection page shows what is actually available now. Worded like the other
+        // invalid-code failures rather than naming the membership, since the caller is
+        // unauthenticated at this point and the distinction is not theirs to learn.
+        if (
+          authCode.organization_id &&
+          !activeOrganizationsFor(authCode.user_id).some((o) => o.id === authCode.organization_id)
+        ) {
+          failAuth(
+            'OAuth',
+            { userId: authCode.user_id, email: ws.users.get(authCode.user_id)?.email },
             new OauthApiError(400, 'invalid_grant', `The code '${code}' has expired or is invalid.`),
           );
         }
@@ -903,14 +994,7 @@ export function authRoutes(ctx: RouteContext): void {
     // refresh is excluded: it reuses a session whose scope is already settled, and an explicit
     // body.organization_id stays the only way to move an existing session between orgs.
     if (isFreshLogin && !organizationId) {
-      const selectableOrgs: Array<{ id: string; name: string }> = [];
-      for (const m of ws.organizationMemberships.findBy('user_id', user.id)) {
-        // 'pending' is an unaccepted invitation and 'inactive' a deactivated member; neither is
-        // an organization production would scope a session to.
-        if (m.status !== 'active') continue;
-        const org = ws.organizations.get(m.organization_id);
-        if (org) selectableOrgs.push({ id: org.id, name: org.name });
-      }
+      const selectableOrgs = activeOrganizationsFor(user.id);
 
       if (selectableOrgs.length === 1) {
         organizationId = selectableOrgs[0].id;
