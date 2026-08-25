@@ -78,10 +78,7 @@ export function renderDeviceVerifyPage(options: DeviceVerifyPageOptions): string
 export function renderLoginPage(options: LoginPageOptions): string {
   const { title, subtitle, emailHint, formAction, hiddenFields, users } = options;
 
-  const hiddenInputs = Object.entries(hiddenFields)
-    .filter(([, v]) => v != null)
-    .map(([name, value]) => `<input type="hidden" name="${esc(name)}" value="${esc(value)}">`)
-    .join('\n        ');
+  const hiddenInputs = renderHiddenInputs(hiddenFields);
 
   // Sorted by email, and by email rather than name because a name is optional. Store order
   // would put whatever was created most recently at the bottom, which moves the rows under
@@ -176,10 +173,7 @@ ${accounts
 export function renderOrganizationSelectPage(options: OrganizationSelectPageOptions): string {
   const { email, organizations, formAction, hiddenFields } = options;
 
-  const hiddenInputs = Object.entries(hiddenFields)
-    .filter(([, v]) => v != null)
-    .map(([name, value]) => `<input type="hidden" name="${esc(name)}" value="${esc(value)}">`)
-    .join('\n        ');
+  const hiddenInputs = renderHiddenInputs(hiddenFields);
 
   const rows = organizations
     .map(
@@ -224,6 +218,14 @@ ${rows}
   </div>
 </body>
 </html>`;
+}
+
+/** Hidden `<input>` elements for a form's carried-through fields, dropping null/undefined values. */
+function renderHiddenInputs(fields: Record<string, string>): string {
+  return Object.entries(fields)
+    .filter(([, v]) => v != null)
+    .map(([name, value]) => `<input type="hidden" name="${esc(name)}" value="${esc(value)}">`)
+    .join('\n        ');
 }
 
 function esc(str: string): string {
