@@ -328,10 +328,12 @@ export function ssoRoutes(ctx: RouteContext): void {
    * actually mints or a client validating one against the other rejects every token. Production
    * can derive it per client; the emulator has a single issuer and reports that.
    *
-   * The client id is not checked, which production does do, returning `entity_not_found`. The
-   * emulator has no registry of AuthKit clients — authorize accepts any `client_id` and
-   * `/sso/jwks/:clientId` serves any id — so refusing here alone would only break callers using
-   * a made-up id everywhere else.
+   * The client id is not checked, which production does do, returning `entity_not_found`. There
+   * is an application registry — `connectApplications`, which `/oauth2/*` looks a client up in —
+   * but nothing puts an AuthKit client there: no route under `/user_management` or `/sso` ever
+   * consults it, authorize accepts any `client_id`, and `/sso/jwks/:clientId` serves any id.
+   * Gating here alone would 404 for every emulator that has not seeded its AuthKit client as a
+   * connect application, which is the default.
    */
   app.get('/user_management/:clientId/.well-known/openid-configuration', (c) => {
     const clientId = c.req.param('clientId');
