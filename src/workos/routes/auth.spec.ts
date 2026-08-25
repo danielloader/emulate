@@ -2200,6 +2200,32 @@ describe('AuthKit interactive auth', () => {
 
   const json = (res: Response) => res.json() as Promise<any>;
 
+  /** Mirrors createOrg/joinOrg in the 'Auth routes' block above, which are out of scope here. */
+  const createOrg = (name: string) =>
+    getWorkOSStore(store).organizations.insert({
+      object: 'organization',
+      name,
+      external_id: null,
+      metadata: {},
+      stripe_customer_id: null,
+      allow_profiles_outside_organization: false,
+      entitlements: [],
+    });
+
+  const joinOrg = (userId: string, name: string) => {
+    const org = createOrg(name);
+    getWorkOSStore(store).organizationMemberships.insert({
+      object: 'organization_membership',
+      organization_id: org.id,
+      user_id: userId,
+      role: { slug: 'member' },
+      status: 'active',
+      external_id: null,
+      metadata: {},
+    });
+    return org;
+  };
+
   const seedUser = (ws: ReturnType<typeof getWorkOSStore>, email: string, name: string | null = null) =>
     ws.users.insert({
       object: 'user',
@@ -2311,24 +2337,8 @@ describe('AuthKit interactive auth', () => {
   it('POST /user_management/authorize asks which organization when a user has several', async () => {
     const ws = getWorkOSStore(store);
     const user = seedUser(ws, 'multi@test.com');
-    for (const name of ['Acme', 'Beta']) {
-      const org = ws.organizations.insert({
-        object: 'organization',
-        name,
-        external_id: null,
-        stripe_customer_id: null,
-        metadata: {},
-      } as any);
-      ws.organizationMemberships.insert({
-        object: 'organization_membership',
-        user_id: user.id,
-        organization_id: org.id,
-        role: { slug: 'member' },
-        status: 'active',
-        external_id: null,
-        metadata: {},
-      } as any);
-    }
+    joinOrg(user.id, 'Acme');
+    joinOrg(user.id, 'Beta');
 
     const res = await app.request('/user_management/authorize', {
       method: 'POST',
@@ -2349,22 +2359,7 @@ describe('AuthKit interactive auth', () => {
   it('POST /user_management/authorize mints a code scoped to the chosen organization', async () => {
     const ws = getWorkOSStore(store);
     const user = seedUser(ws, 'multi2@test.com');
-    const chosen = ws.organizations.insert({
-      object: 'organization',
-      name: 'Chosen',
-      external_id: null,
-      stripe_customer_id: null,
-      metadata: {},
-    } as any);
-    ws.organizationMemberships.insert({
-      object: 'organization_membership',
-      user_id: user.id,
-      organization_id: chosen.id,
-      role: { slug: 'member' },
-      status: 'active',
-      external_id: null,
-      metadata: {},
-    } as any);
+    const chosen = joinOrg(user.id, 'Chosen');
 
     const res = await app.request('/user_management/authorize', {
       method: 'POST',
@@ -2384,13 +2379,7 @@ describe('AuthKit interactive auth', () => {
   it('POST /user_management/authorize refuses an organization the user is not in', async () => {
     const ws = getWorkOSStore(store);
     seedUser(ws, 'outsider@test.com');
-    const other = ws.organizations.insert({
-      object: 'organization',
-      name: 'Someone Else',
-      external_id: null,
-      stripe_customer_id: null,
-      metadata: {},
-    } as any);
+    const other = createOrg('Someone Else');
 
     const res = await app.request('/user_management/authorize', {
       method: 'POST',
