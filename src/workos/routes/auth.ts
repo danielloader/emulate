@@ -187,6 +187,10 @@ export function authRoutes(ctx: RouteContext): void {
           emailHint: loginHint ?? undefined,
           formAction: '/user_management/authorize',
           hiddenFields,
+          // Every user the emulator holds, seeded or created through the API since; the page
+          // sorts them. Behind --interactive, and the same list is already readable from
+          // GET /user_management/users, so this discloses nothing it did not already hand out.
+          users: ws.users.all().map((u) => ({ email: u.email, name: u.name })),
         }),
       );
     }

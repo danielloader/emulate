@@ -2200,10 +2200,10 @@ describe('AuthKit interactive auth', () => {
 
   const json = (res: Response) => res.json() as Promise<any>;
 
-  const seedUser = (ws: ReturnType<typeof getWorkOSStore>, email: string) =>
+  const seedUser = (ws: ReturnType<typeof getWorkOSStore>, email: string, name: string | null = null) =>
     ws.users.insert({
       object: 'user',
-      name: null,
+      name,
       email,
       first_name: null,
       last_name: null,
@@ -2242,6 +2242,70 @@ describe('AuthKit interactive auth', () => {
     expect(html).toContain('<form');
     expect(html).toContain('name="email"');
     expect(html).toContain('name="redirect_uri"');
+  });
+
+  it('GET /user_management/authorize offers the stored accounts as a picker', async () => {
+    const ws = getWorkOSStore(store);
+    seedUser(ws, 'alice@test.com', 'Alice Smith');
+    seedUser(ws, 'bob@test.com');
+
+    const res = await app.request('/user_management/authorize?redirect_uri=http://localhost:3000/callback');
+    const html = await res.text();
+
+    expect(html).toContain('<summary>Pick an account (2)</summary>');
+    // A submit button per account, so picking one posts that email directly. Named where a
+    // name is known, bare where it is not.
+    expect(html).toContain('name="email" value="alice@test.com"');
+    expect(html).toContain('Alice Smith');
+    expect(html).toContain('name="email" value="bob@test.com"');
+    // The free-text field is still there, so an unseeded address can still be typed.
+    expect(html).toContain('name="email"');
+    expect(html).toContain('type="email"');
+  });
+
+  it('GET /user_management/authorize lists accounts in email order', async () => {
+    const ws = getWorkOSStore(store);
+    // Inserted out of order, so store order and email order disagree.
+    seedUser(ws, 'zoe@test.com', 'Zoe Last');
+    seedUser(ws, 'alice@test.com', 'Alice First');
+    seedUser(ws, 'mo@test.com', 'Mo Middle');
+
+    const res = await app.request('/user_management/authorize?redirect_uri=http://localhost:3000/callback');
+    const html = await res.text();
+
+    const positions = ['alice@test.com', 'mo@test.com', 'zoe@test.com'].map((email) =>
+      html.indexOf(`value="${email}"`),
+    );
+    expect(positions.every((p) => p >= 0)).toBe(true);
+    expect(positions).toEqual([...positions].sort((a, b) => a - b));
+  });
+
+  it('GET /user_management/authorize lists a user created after startup', async () => {
+    const ws = getWorkOSStore(store);
+    seedUser(ws, 'seeded@test.com', 'Seeded User');
+
+    // A user created through the API mid-session, which is exactly the account someone testing a
+    // sign-up then wants to sign in as.
+    const created = await app.request('/user_management/users', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ email: 'later@test.com', first_name: 'Later', last_name: 'User' }),
+    });
+    expect(created.status).toBe(201);
+
+    const res = await app.request('/user_management/authorize?redirect_uri=http://localhost:3000/callback');
+    const html = await res.text();
+
+    expect(html).toContain('<summary>Pick an account (2)</summary>');
+    expect(html).toContain('name="email" value="later@test.com"');
+  });
+
+  it('GET /user_management/authorize omits the picker when the store is empty', async () => {
+    const res = await app.request('/user_management/authorize?redirect_uri=http://localhost:3000/callback');
+    const html = await res.text();
+
+    expect(html).not.toContain('<details');
+    expect(html).not.toContain('Pick an account');
   });
 
   it('POST /user_management/authorize asks which organization when a user has several', async () => {

@@ -4,6 +4,26 @@ export interface LoginPageOptions {
   emailHint?: string;
   formAction: string;
   hiddenFields: Record<string, string>;
+  /**
+   * Accounts to offer beneath the email field, collapsed behind a disclosure. Every user the
+   * emulator holds, not only the seeded ones: a user created through the API mid-session appears
+   * here too, which is what makes the list useful for testing a sign-up.
+   *
+   * Collapsed by default, so the page an unknown address or a sign-up arrives at is the page it
+   * has always been. Flat rather than grouped by organization, because the emulator asks which
+   * organization in its own later step and grouping here would imply a choice this page does not
+   * make. Each account is a submit button in a second form, so picking one is a single click and
+   * `<details>` does the expanding, which leaves the page with no JavaScript. The list scrolls
+   * rather than growing the card, so a large store stays usable. Omitted or empty renders the
+   * page exactly as before.
+   */
+  users?: LoginPageUser[];
+}
+
+/** A seeded account offered on the sign-in page, so a developer picks rather than remembers. */
+export interface LoginPageUser {
+  email: string;
+  name?: string | null;
 }
 
 /** One organization a user may finish signing in to. */
@@ -56,12 +76,38 @@ export function renderDeviceVerifyPage(options: DeviceVerifyPageOptions): string
 }
 
 export function renderLoginPage(options: LoginPageOptions): string {
-  const { title, subtitle, emailHint, formAction, hiddenFields } = options;
+  const { title, subtitle, emailHint, formAction, hiddenFields, users } = options;
 
   const hiddenInputs = Object.entries(hiddenFields)
     .filter(([, v]) => v != null)
     .map(([name, value]) => `<input type="hidden" name="${esc(name)}" value="${esc(value)}">`)
     .join('\n        ');
+
+  // Sorted by email, and by email rather than name because a name is optional. Store order
+  // would put whatever was created most recently at the bottom, which moves the rows under
+  // someone mid-session; lexical keeps a given account in the same place. Copied first, so the
+  // caller's slice is not reordered underneath it.
+  const accounts = [...(users ?? [])].sort((a, b) => a.email.localeCompare(b.email, 'en'));
+  const picker =
+    accounts.length === 0
+      ? ''
+      : `
+    <details class="accounts">
+      <summary>Pick an account (${accounts.length})</summary>
+      <form method="POST" action="${esc(formAction)}">
+        ${hiddenInputs}
+        <div class="account-list">
+${accounts
+  .map(
+    (u) => `          <button class="account" type="submit" name="email" value="${esc(u.email)}">
+            <span class="who">${u.name ? `<span class="name">${esc(u.name)}</span>` : ''}<span class="email">${esc(u.email)}</span></span>
+            <span class="chevron" aria-hidden="true">&rsaquo;</span>
+          </button>`,
+  )
+  .join('\n')}
+        </div>
+      </form>
+    </details>`;
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -81,6 +127,21 @@ export function renderLoginPage(options: LoginPageOptions): string {
     input[type="email"]:focus{border-color:#6366f1;box-shadow:0 0 0 3px rgba(99,102,241,.1)}
     button{width:100%;padding:10px;background:#6366f1;color:#fff;border:none;border-radius:6px;font-size:14px;font-weight:500;cursor:pointer;margin-top:16px}
     button:hover{background:#4f46e5}
+    .accounts{margin-top:24px;border-top:1px solid #e5e7eb;padding-top:16px}
+    .accounts summary{cursor:pointer;font-size:13px;color:#6b7280;list-style:none}
+    .accounts summary::-webkit-details-marker{display:none}
+    .accounts summary::before{content:"\\203A";display:inline-block;margin-right:6px;transition:transform .15s}
+    .accounts[open] summary::before{transform:rotate(90deg)}
+    .accounts summary:hover{color:#111827}
+    .account-list{margin-top:12px;max-height:220px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:6px}
+    .account{display:flex;align-items:center;justify-content:space-between;width:100%;padding:10px 14px;background:#fff;border:none;border-bottom:1px solid #e5e7eb;text-align:left;cursor:pointer;margin-top:0}
+    .account:last-child{border-bottom:none}
+    .account:hover{background:#f9fafb}
+    .account:focus-visible{outline:2px solid #6366f1;outline-offset:-2px}
+    .who{display:flex;flex-direction:column;gap:2px}
+    .name{font-size:14px;font-weight:500;color:#111827}
+    .email{font-size:12px;color:#6b7280}
+    .chevron{color:#9ca3af;font-size:18px;line-height:1}
   </style>
 </head>
 <body>
@@ -93,7 +154,7 @@ export function renderLoginPage(options: LoginPageOptions): string {
         <label for="email">Email</label>
         <input type="email" id="email" name="email" value="${esc(emailHint ?? '')}" required autofocus>
         <button type="submit">Continue</button>
-    </form>
+    </form>${picker}
   </div>
 </body>
 </html>`;
