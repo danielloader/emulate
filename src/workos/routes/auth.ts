@@ -605,16 +605,27 @@ export function authRoutes(ctx: RouteContext): void {
           );
         }
         // A code outlives the membership that justified it easily enough: ten minutes is long
-        // enough for one to be deactivated or deleted in between. Trusting the stored
-        // organization would issue a session, tokens, a role and permissions for an
-        // organization the user no longer actively belongs to, so it is dropped and the
-        // resolution below runs as though the code had never carried one, which is what every
-        // other grant does.
-        organizationId =
+        // enough for one to be revoked in between. Neither obvious response is right. Trusting
+        // the stored organization issues a session, tokens, a role and permissions for one the
+        // user no longer belongs to. Clearing it and re-resolving is worse in a quieter way: a
+        // user left with exactly one other membership is signed into that tenant instead,
+        // without being told, having picked the first.
+        //
+        // So the grant fails. Its premise is gone, and the client's move is to authorize again,
+        // where the selection page shows what is actually available now. Worded like the other
+        // invalid-code failures rather than naming the membership, since the caller is
+        // unauthenticated at this point and the distinction is not theirs to learn.
+        if (
           authCode.organization_id &&
-          activeOrganizationsFor(authCode.user_id).some((o) => o.id === authCode.organization_id)
-            ? authCode.organization_id
-            : null;
+          !activeOrganizationsFor(authCode.user_id).some((o) => o.id === authCode.organization_id)
+        ) {
+          failAuth(
+            'OAuth',
+            { userId: authCode.user_id, email: ws.users.get(authCode.user_id)?.email },
+            new OauthApiError(400, 'invalid_grant', `The code '${code}' has expired or is invalid.`),
+          );
+        }
+        organizationId = authCode.organization_id;
         // Bind the token's client_id to the authorization grant, not the unvalidated
         // redemption-time request parameter.
         grantClientId = authCode.client_id ?? undefined;

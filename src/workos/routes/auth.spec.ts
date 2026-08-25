@@ -2376,40 +2376,69 @@ describe('AuthKit interactive auth', () => {
     expect(ws.authCodes.findOneBy('code', code)?.organization_id).toBe(chosen.id);
   });
 
-  it('drops a code\u2019s organization when the membership is revoked before redemption', async () => {
-    const ws = getWorkOSStore(store);
-    const user = seedUser(ws, 'revoked@test.com');
-    const org = joinOrg(user.id, 'Acme');
-
-    const authorize = await app.request('/user_management/authorize', {
+  /** Mint an organization-scoped code the way the selection page does. */
+  const mintScopedCode = async (email: string, organizationId: string) => {
+    const res = await app.request('/user_management/authorize', {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
         redirect_uri: 'http://localhost:3000/callback',
-        email: 'revoked@test.com',
-        organization_id: org.id,
+        email,
+        organization_id: organizationId,
       }),
     });
-    const code = new URL(authorize.headers.get('location')!).searchParams.get('code')!;
+    return new URL(res.headers.get('location')!).searchParams.get('code')!;
+  };
 
-    // Revoked inside the code's ten minute window, which is the whole point: the code still
-    // names the organization.
-    const membership = ws.organizationMemberships.findBy('user_id', user.id)[0]!;
-    const deactivated = await app.request(`/user_management/organization_memberships/${membership.id}/deactivate`, {
+  const revokeMembership = async (userId: string, organizationId: string) => {
+    const membership = getWorkOSStore(store)
+      .organizationMemberships.findBy('user_id', userId)
+      .find((m) => m.organization_id === organizationId)!;
+    const res = await app.request(`/user_management/organization_memberships/${membership.id}/deactivate`, {
       method: 'PUT',
       headers,
     });
-    expect(deactivated.status).toBe(200);
+    expect(res.status).toBe(200);
+  };
 
-    const res = await app.request('/user_management/authenticate', {
+  const redeem = (code: string) =>
+    app.request('/user_management/authenticate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ grant_type: 'authorization_code', code }),
     });
 
-    expect(res.status).toBe(200);
-    // Not scoped to the organization the code named, because the membership behind it is gone.
-    expect((await json(res)).organization_id).not.toBe(org.id);
+  it('refuses a code whose organization membership was revoked before redemption', async () => {
+    const ws = getWorkOSStore(store);
+    const user = seedUser(ws, 'revoked@test.com');
+    const org = joinOrg(user.id, 'Acme');
+
+    const code = await mintScopedCode('revoked@test.com', org.id);
+    await revokeMembership(user.id, org.id);
+
+    const res = await redeem(code);
+
+    expect(res.status).toBe(400);
+    expect((await json(res)).error).toBe('invalid_grant');
+  });
+
+  it('refuses rather than silently signing the user into their other organization', async () => {
+    const ws = getWorkOSStore(store);
+    const user = seedUser(ws, 'switcheroo@test.com');
+    const picked = joinOrg(user.id, 'Picked');
+    const other = joinOrg(user.id, 'Other');
+
+    const code = await mintScopedCode('switcheroo@test.com', picked.id);
+    await revokeMembership(user.id, picked.id);
+
+    // Exactly one active membership is left, so re-resolving would have found it and signed the
+    // user into a tenant they never chose.
+    const res = await redeem(code);
+
+    expect(res.status).toBe(400);
+    const body = await json(res);
+    expect(body.error).toBe('invalid_grant');
+    expect(JSON.stringify(body)).not.toContain(other.id);
   });
 
   it('POST /user_management/authorize refuses an organization the user is not in', async () => {
