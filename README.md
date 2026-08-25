@@ -803,10 +803,12 @@ What this buys you:
 
 - **OIDC discovery.** `GET /user_management/:client_id/.well-known/openid-configuration` serves the
   same document production does, unauthenticated, so a client that discovers its endpoints rather
-  than hard-coding them needs no emulator-specific branch. One deliberate difference: `issuer` is
-  the emulator's configured issuer, not production's `{base}/user_management/{client_id}`, because
-  it has to match the `iss` the emulator actually mints or a client validating one against the
-  other rejects every token.
+  than hard-coding them needs no emulator-specific branch. The endpoints follow the host the
+  document was fetched over, so reaching the emulator as `host.docker.internal` or a service name
+  gets a document pointing back at that name rather than at localhost. One deliberate difference:
+  `issuer` is the emulator's configured issuer, not production's
+  `{base}/user_management/{client_id}`, because it has to match the `iss` the emulator actually
+  mints or a client validating one against the other rejects every token.
 - **JWKS stable across restarts.** `/sso/jwks/:client_id` publishes the same key every boot, so a
   token minted before a restart still verifies after it. Without a pinned key, a verifier that
   cached the JWKS must refetch.

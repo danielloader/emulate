@@ -323,26 +323,44 @@ export function ssoRoutes(ctx: RouteContext): void {
    * `/user_management/{client_id}/.well-known/openid-configuration`. Unauthenticated, as it is
    * upstream: a client fetches it before it holds anything.
    *
-   * `issuer` is the emulator's configured issuer rather than production's
-   * `{base}/user_management/{client_id}`, because it has to match the `iss` the emulator
-   * actually mints or a client validating one against the other rejects every token. Production
-   * can derive it per client; the emulator has a single issuer and reports that.
+   * Endpoints are built from the requested origin rather than the configured base URL, because a
+   * document is only useful to whoever fetched it. Reached over host.docker.internal or a LAN
+   * address — both ordinary for the container image — a base-URL document would advertise
+   * localhost, which is precisely the host that caller cannot reach.
    *
-   * The client id is not checked, which production does do, returning `entity_not_found`. There
-   * is an application registry — `connectApplications`, which `/oauth2/*` looks a client up in —
-   * but nothing puts an AuthKit client there: no route under `/user_management` or `/sso` ever
-   * consults it, authorize accepts any `client_id`, and `/sso/jwks/:clientId` serves any id.
-   * Gating here alone would 404 for every emulator that has not seeded its AuthKit client as a
-   * connect application, which is the default.
+   * `issuer` is the exception, and stays the configured issuer: it has to match the `iss` the
+   * emulator mints or a client validating one against the other rejects every token. Production
+   * derives it per client as `{base}/user_management/{client_id}`; the emulator has one issuer
+   * and reports that.
+   *
+   * A client id that could not be one is refused the way production refuses an unknown one.
+   * Registered clients cannot be told apart here — no route under `/user_management` or `/sso`
+   * consults the `connectApplications` registry, so an AuthKit client is never in it — but
+   * anything outside the character set an id can use is not a client under any reading, and
+   * serving it would only reflect junk back into `jwks_uri`.
    */
+  const CLIENT_ID_SHAPE = /^[A-Za-z0-9_-]+$/;
+
   app.get('/user_management/:clientId/.well-known/openid-configuration', (c) => {
     const clientId = c.req.param('clientId');
+    if (!CLIENT_ID_SHAPE.test(clientId)) {
+      return c.json(
+        {
+          message: `Application not found: '${clientId}'.`,
+          code: 'entity_not_found',
+          entity_id: clientId,
+        },
+        404,
+      );
+    }
+
+    const origin = new URL(c.req.url).origin;
     return c.json({
       issuer: jwt.issuer,
-      authorization_endpoint: `${ctx.baseUrl}/user_management/authorize`,
-      token_endpoint: `${ctx.baseUrl}/user_management/authenticate`,
+      authorization_endpoint: `${origin}/user_management/authorize`,
+      token_endpoint: `${origin}/user_management/authenticate`,
       response_types_supported: ['code'],
-      jwks_uri: `${ctx.baseUrl}/sso/jwks/${clientId}`,
+      jwks_uri: `${origin}/sso/jwks/${clientId}`,
     });
   });
 

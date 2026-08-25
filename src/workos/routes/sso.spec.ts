@@ -628,6 +628,34 @@ describe('OIDC discovery', () => {
     expect(body.jwks_uri).toMatch(/\/sso\/jwks\/client_01EXAMPLE$/);
   });
 
+  it('builds its endpoints from the host it was fetched over, not the configured base URL', async () => {
+    const { app } = createTestApp();
+
+    // The container image is routinely reached as something other than localhost — over
+    // host.docker.internal, a service name, a LAN address — and a document advertising the
+    // configured base URL would point that caller at a host it cannot reach.
+    const res = await app.request(
+      new Request('http://host.docker.internal:4100/user_management/client_01EXAMPLE/.well-known/openid-configuration'),
+    );
+    const body = (await res.json()) as Record<string, string>;
+
+    expect(body.authorization_endpoint).toBe('http://host.docker.internal:4100/user_management/authorize');
+    expect(body.token_endpoint).toBe('http://host.docker.internal:4100/user_management/authenticate');
+    expect(body.jwks_uri).toBe('http://host.docker.internal:4100/sso/jwks/client_01EXAMPLE');
+  });
+
+  it('refuses a client id that could not be one, the way production refuses an unknown one', async () => {
+    const { app } = createTestApp();
+
+    const res = await app.request('/user_management/%3Cscript%3E/.well-known/openid-configuration');
+
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as Record<string, string>;
+    expect(body.code).toBe('entity_not_found');
+    // Nothing reflected into a document that then advertises it as a JWKS endpoint.
+    expect(body).not.toHaveProperty('jwks_uri');
+  });
+
   it('advertises the issuer it actually mints, so a client can validate iss against it', async () => {
     const { app, store } = createTestApp();
     const ws = getWorkOSStore(store);
