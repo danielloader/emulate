@@ -130,7 +130,22 @@ export class JWTManager {
   private privateKey: KeyObject;
   private publicKey: KeyObject;
   private kid: string;
-  issuer: string;
+  private _issuer = '';
+
+  /**
+   * Base the `iss` claim is built from. Trailing slashes are stripped on the way in, whichever
+   * way it is set, because `authKitIssuer` concatenates: `--issuer https://api.workos.com/`
+   * would otherwise mint `https://api.workos.com//user_management/client_x`, which equals
+   * nothing production emits and nothing a verifier is comparing against. Settable because
+   * `createEmulator` learns the bound URL only after listen() resolves an ephemeral port.
+   */
+  get issuer(): string {
+    return this._issuer;
+  }
+
+  set issuer(value: string) {
+    this._issuer = value.replace(/\/+$/, '');
+  }
 
   constructor(issuer = 'https://api.workos.com', signingKey?: SigningKeyOptions) {
     this.issuer = issuer;

@@ -608,6 +608,40 @@ describe('SSO authentication events', () => {
 });
 
 describe('OIDC discovery', () => {
+  const seedUser = (store: Store) =>
+    getWorkOSStore(store).users.insert({
+      object: 'user',
+      name: null,
+      email: 'discovery@test.com',
+      first_name: null,
+      last_name: null,
+      email_verified: true,
+      profile_picture_url: null,
+      last_sign_in_at: null,
+      external_id: null,
+      metadata: {},
+      locale: null,
+      password_hash: null,
+      impersonator: null,
+    });
+
+  /** Sign in through the flow the document advertises and return the access token's claims. */
+  const mintToken = async (app: ReturnType<typeof createTestApp>['app'], origin: string, clientId: string) => {
+    const authorize = await app.request(
+      `${origin}/user_management/authorize?redirect_uri=http://localhost:3000/callback&client_id=${clientId}`,
+    );
+    const code = new URL(authorize.headers.get('location')!).searchParams.get('code')!;
+    const token = (await (
+      await app.request(`${origin}/user_management/authenticate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ grant_type: 'authorization_code', code, client_id: clientId }),
+      })
+    ).json()) as { access_token: string };
+
+    return JSON.parse(Buffer.from(token.access_token.split('.')[1]!, 'base64url').toString()) as Record<string, string>;
+  };
+
   it('serves the document unauthenticated, shaped as production does', async () => {
     const { app } = createTestApp();
 
@@ -661,6 +695,38 @@ describe('OIDC discovery', () => {
     expect(body).not.toHaveProperty('jwks_uri');
   });
 
+  it.each([
+    ['a readable pinned id', 'client_local_backend'],
+    ['a hyphenated one', 'client_web-app'],
+  ])('serves %s, since that is an id the emulator mints an `iss` from', async (_case, clientId) => {
+    const { app, store } = createTestApp({ baseUrl: 'https://api.workos.com' });
+    seedUser(store);
+
+    // Walk it the way a discovering client does: mint a token, read `iss`, fetch the document
+    // `iss` promises is there. Production ids are ULIDs, but the emulator lets you pin a readable
+    // one — `client_local_backend` is the README's own — and `authorize`, `authenticate` and
+    // `/sso/jwks` take any id and build `iss` from it. A shape check stricter than theirs 404s a
+    // client at its own issuer, which is the dead end this route exists to remove.
+    const claims = await mintToken(app, 'https://api.workos.com', clientId);
+    expect(claims.iss).toBe(`https://api.workos.com/user_management/${clientId}`);
+
+    const res = await app.request(`${claims.iss}/.well-known/openid-configuration`);
+
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as Record<string, string>).issuer).toBe(claims.iss);
+  });
+
+  it('404s a trailing slash rather than 401ing it', async () => {
+    const { app } = createTestApp();
+
+    const res = await app.request('/user_management/client_01EXAMPLE/.well-known/openid-configuration/');
+
+    // The route itself does not match the trailing slash, and need not. What it must not do is
+    // fall to the auth middleware: a 401 says the document is behind a credential and invites a
+    // retry that cannot succeed, which is the confusion this whole route exists to end.
+    expect(res.status).toBe(404);
+  });
+
   it('reports an issuer equal to the URL the document was fetched from, per OIDC Discovery §4.3', async () => {
     const { app } = createTestApp({ baseUrl: 'https://api.workos.com' });
 
@@ -679,23 +745,7 @@ describe('OIDC discovery', () => {
 
   it('advertises the issuer it actually mints, so a client can validate iss against it', async () => {
     const { app, store } = createTestApp();
-    const ws = getWorkOSStore(store);
-
-    ws.users.insert({
-      object: 'user',
-      name: null,
-      email: 'discovery@test.com',
-      first_name: null,
-      last_name: null,
-      email_verified: true,
-      profile_picture_url: null,
-      last_sign_in_at: null,
-      external_id: null,
-      metadata: {},
-      locale: null,
-      password_hash: null,
-      impersonator: null,
-    });
+    seedUser(store);
 
     const doc = (await (
       await app.request('/user_management/client_01EXAMPLE/.well-known/openid-configuration')
@@ -704,22 +754,7 @@ describe('OIDC discovery', () => {
     // Mint a real token through the flow the document advertises, rather than trusting the
     // document about itself: a client fetches discovery precisely to validate `iss`, so the two
     // drifting apart is the failure worth catching.
-    const authorize = await app.request(
-      '/user_management/authorize?redirect_uri=http://localhost:3000/callback&client_id=client_01EXAMPLE',
-    );
-    const code = new URL(authorize.headers.get('location')!).searchParams.get('code')!;
-    const token = (await (
-      await app.request('/user_management/authenticate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ grant_type: 'authorization_code', code, client_id: 'client_01EXAMPLE' }),
-      })
-    ).json()) as { access_token: string };
-
-    const claims = JSON.parse(Buffer.from(token.access_token.split('.')[1]!, 'base64url').toString()) as Record<
-      string,
-      string
-    >;
+    const claims = await mintToken(app, '', 'client_01EXAMPLE');
 
     expect(claims.iss).toBe(doc.issuer);
     expect(claims.aud).toBe('client_01EXAMPLE');

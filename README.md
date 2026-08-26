@@ -813,8 +813,9 @@ What this buys you:
 `--issuer` is the base the client id hangs off, not the whole claim. An AuthKit access token from
 `/user_management/authenticate` carries `iss` of `{issuer}/user_management/{client_id}`, which is
 what production mints — so `--issuer https://api.workos.com` with a client of `client_123` gives
-`https://api.workos.com/user_management/client_123`. Only the M2M, SSO and widget tokens carry the
-bare value.
+`https://api.workos.com/user_management/client_123`. The M2M, SSO and widget tokens carry the bare
+value, as does an AuthKit token from a grant that named no `client_id` — there is no client to hang
+off, and inventing a placeholder would advertise an issuer whose discovery document is not there.
 
 The key must be a PEM-encoded RSA private key, since tokens are signed RS256; anything else fails at
 startup with a message saying why. Omit `--kid` and the `kid` is derived from the key itself, so it

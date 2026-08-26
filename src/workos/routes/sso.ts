@@ -347,8 +347,14 @@ export function ssoRoutes(ctx: RouteContext): void {
    * consults the `connectApplications` registry, so an AuthKit client is never in it — so this
    * checks the one thing that needs no registry: that the id is shaped like a client id at all.
    * Serving anything else would reflect it straight back out as a `jwks_uri`.
+   *
+   * Deliberately no narrower than that. Production ids are ULIDs, but the emulator lets you pin
+   * a readable one — `client_local_backend`, the README's own example — and `authorize`,
+   * `authenticate` and
+   * `/sso/jwks` all take any id and mint `iss` from it. A shape stricter than theirs would 404
+   * the discovery document at the very issuer the emulator puts in its own tokens.
    */
-  const CLIENT_ID_SHAPE = /^client_[A-Za-z0-9]+$/;
+  const CLIENT_ID_SHAPE = /^client_[A-Za-z0-9_-]+$/;
 
   app.get('/user_management/:clientId/.well-known/openid-configuration', (c) => {
     const clientId = c.req.param('clientId');
