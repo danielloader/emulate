@@ -1104,6 +1104,10 @@ export function authRoutes(ctx: RouteContext): void {
     // Prefer the client_id bound to the originating grant (auth code or refresh token)
     // over the unvalidated redemption-time request parameter.
     const tokenClientId = grantClientId ?? clientId;
+    // Both `aud` and the client id `iss` is scoped to, so the token agrees with the discovery
+    // document fetched for that client. Falls back with `aud` rather than separately: an issuer
+    // naming one client and an audience naming another would be worse than either.
+    const tokenAudience = tokenClientId ?? 'workos-emulate';
 
     // Entitlements and feature flags re-resolve at every mint — including refresh grants — so
     // a plan change or flag toggle lands in the next token. Both claims are omitted rather
@@ -1132,9 +1136,9 @@ export function authRoutes(ctx: RouteContext): void {
         act: updatedUser.impersonator ? { sub: updatedUser.impersonator.email } : undefined,
         entitlements: entitlements?.length ? entitlements : undefined,
         feature_flags: flagSlugs.length ? flagSlugs : undefined,
-        aud: tokenClientId ?? 'workos-emulate',
+        aud: tokenAudience,
       },
-      { claims: templateClaims },
+      { claims: templateClaims, issuerClientId: tokenAudience },
     );
 
     // Store a real refresh token

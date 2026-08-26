@@ -323,23 +323,32 @@ export function ssoRoutes(ctx: RouteContext): void {
    * `/user_management/{client_id}/.well-known/openid-configuration`. Unauthenticated, as it is
    * upstream: a client fetches it before it holds anything.
    *
+   * These five fields are the whole document production returns — `openidConfiguration` in
+   * `api/src/userland-sessions/userland-sso.controller.ts`. Notably absent are
+   * `subject_types_supported` and `id_token_signing_alg_values_supported`, which OIDC Discovery
+   * 1.0 §3 marks REQUIRED. Their absence is fidelity, not oversight: adding them here would
+   * make a client that needs them pass against the emulator and fail against WorkOS, which is
+   * the one outcome an emulator must never produce.
+   *
    * Endpoints are built from the requested origin rather than the configured base URL, because a
    * document is only useful to whoever fetched it. Reached over host.docker.internal or a LAN
    * address — both ordinary for the container image — a base-URL document would advertise
-   * localhost, which is precisely the host that caller cannot reach.
+   * localhost, which is precisely the host that caller cannot reach. Production has no such
+   * problem to solve: it builds them from a configured `API_URL`, the only name it answers on.
    *
-   * `issuer` is the exception, and stays the configured issuer: it has to match the `iss` the
-   * emulator mints or a client validating one against the other rejects every token. Production
-   * derives it per client as `{base}/user_management/{client_id}`; the emulator has one issuer
-   * and reports that.
+   * `issuer` is the exception, and comes from `jwt.authKitIssuer` rather than the origin, because
+   * it has to equal the `iss` the emulator mints — a client fetches this document precisely to
+   * validate one against the other.
    *
-   * A client id that could not be one is refused the way production refuses an unknown one.
-   * Registered clients cannot be told apart here — no route under `/user_management` or `/sso`
-   * consults the `connectApplications` registry, so an AuthKit client is never in it — but
-   * anything outside the character set an id can use is not a client under any reading, and
-   * serving it would only reflect junk back into `jwks_uri`.
+   * A client id that could not be one is refused the way production refuses an unknown one,
+   * verified against `api.workos.com`:
+   * `{"message":"Application not found: '…'","code":"entity_not_found","entity_id":"…"}`.
+   * Registered clients still cannot be told apart — no route under `/user_management` or `/sso`
+   * consults the `connectApplications` registry, so an AuthKit client is never in it — so this
+   * checks the one thing that needs no registry: that the id is shaped like a client id at all.
+   * Serving anything else would reflect it straight back out as a `jwks_uri`.
    */
-  const CLIENT_ID_SHAPE = /^[A-Za-z0-9_-]+$/;
+  const CLIENT_ID_SHAPE = /^client_[A-Za-z0-9]+$/;
 
   app.get('/user_management/:clientId/.well-known/openid-configuration', (c) => {
     const clientId = c.req.param('clientId');
@@ -356,7 +365,7 @@ export function ssoRoutes(ctx: RouteContext): void {
 
     const origin = new URL(c.req.url).origin;
     return c.json({
-      issuer: jwt.issuer,
+      issuer: jwt.authKitIssuer(clientId),
       authorization_endpoint: `${origin}/user_management/authorize`,
       token_endpoint: `${origin}/user_management/authenticate`,
       response_types_supported: ['code'],

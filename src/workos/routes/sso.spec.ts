@@ -8,8 +8,8 @@ import type { Store } from '../../core/index.js';
 const apiKeys: ApiKeyMap = { sk_test_sso: { environment: 'test' } };
 const headers = { Authorization: 'Bearer sk_test_sso', 'Content-Type': 'application/json' };
 
-function createTestApp() {
-  return createServer(workosPlugin, { port: 0, baseUrl: 'http://localhost:0', apiKeys });
+function createTestApp(options: { baseUrl?: string } = {}) {
+  return createServer(workosPlugin, { port: 0, baseUrl: options.baseUrl ?? 'http://localhost:0', apiKeys });
 }
 
 describe('SSO routes', () => {
@@ -644,16 +644,37 @@ describe('OIDC discovery', () => {
     expect(body.jwks_uri).toBe('http://host.docker.internal:4100/sso/jwks/client_01EXAMPLE');
   });
 
-  it('refuses a client id that could not be one, the way production refuses an unknown one', async () => {
+  it.each([
+    ['punctuation an id never carries', '%3Cscript%3E'],
+    // Alphanumeric, so a character-set check served this one a document advertising
+    // `/sso/jwks/notaclient` as a key endpoint. Nothing without the prefix is a client id.
+    ['a bare word with no client_ prefix', 'notaclient'],
+  ])('refuses %s, the way production refuses an unknown id', async (_case, id) => {
     const { app } = createTestApp();
 
-    const res = await app.request('/user_management/%3Cscript%3E/.well-known/openid-configuration');
+    const res = await app.request(`/user_management/${id}/.well-known/openid-configuration`);
 
     expect(res.status).toBe(404);
     const body = (await res.json()) as Record<string, string>;
     expect(body.code).toBe('entity_not_found');
     // Nothing reflected into a document that then advertises it as a JWKS endpoint.
     expect(body).not.toHaveProperty('jwks_uri');
+  });
+
+  it('reports an issuer equal to the URL the document was fetched from, per OIDC Discovery §4.3', async () => {
+    const { app } = createTestApp({ baseUrl: 'https://api.workos.com' });
+
+    // §4.3: "The `issuer` value returned MUST be identical to the Issuer URL that was used as
+    // the prefix to /.well-known/openid-configuration". That prefix carries the client id, so a
+    // bare issuer can never satisfy it — openid-client v6, Spring's fromIssuerLocation and pyoidc
+    // all throw before they reach `token_endpoint`, which is the one class of client that fetches
+    // this document at all.
+    const res = await app.request(
+      new Request('https://api.workos.com/user_management/client_01EXAMPLE/.well-known/openid-configuration'),
+    );
+    const body = (await res.json()) as Record<string, string>;
+
+    expect(body.issuer).toBe('https://api.workos.com/user_management/client_01EXAMPLE');
   });
 
   it('advertises the issuer it actually mints, so a client can validate iss against it', async () => {

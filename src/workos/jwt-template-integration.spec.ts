@@ -377,7 +377,7 @@ describe('Pinned signing key and issuer', () => {
     expect((await jwks(emulator.url)).keys[0].kid).toBe('ci_key');
   });
 
-  it('mints a pinned issuer instead of the emulator URL', async () => {
+  it('scopes a pinned issuer to the client, as production does, instead of the emulator URL', async () => {
     emulator = await createEmulator({
       port: 0,
       issuer: 'https://api.workos.com',
@@ -397,10 +397,13 @@ describe('Pinned signing key and issuer', () => {
     });
     const body = (await res.json()) as any;
     const claims = JSON.parse(Buffer.from(body.access_token.split('.')[1], 'base64url').toString('utf-8'));
-    expect(claims.iss).toBe('https://api.workos.com');
+    // `--issuer` is the base the client id hangs off, matching production's `getIssuer`:
+    // `${apiUrl}/user_management/${clientId}` under the default `issuerType: 'ClientId'`. Pinning
+    // it to the bare API URL was minting production's non-default `'Legacy'` shape.
+    expect(claims.iss).toBe('https://api.workos.com/user_management/client_test');
   });
 
-  it('defaults the issuer to the emulator URL', async () => {
+  it('defaults the issuer base to the emulator URL', async () => {
     emulator = await createEmulator({
       port: 0,
       seed: { users: [{ email: 'alice@acme.com', password: 'test123', email_verified: true }] },
@@ -419,6 +422,6 @@ describe('Pinned signing key and issuer', () => {
     });
     const body = (await res.json()) as any;
     const claims = JSON.parse(Buffer.from(body.access_token.split('.')[1], 'base64url').toString('utf-8'));
-    expect(claims.iss).toBe(emulator.url);
+    expect(claims.iss).toBe(`${emulator.url}/user_management/client_test`);
   });
 });
