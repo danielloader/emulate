@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from 'bun:test';
-import { createServer, type ApiKeyMap } from '../../core/index.js';
+import { createServer, type ApiKeyMap, type Store } from '../../core/index.js';
 import { workosPlugin } from '../index.js';
+import { getWorkOSStore } from '../store.js';
 
 const apiKeys: ApiKeyMap = { sk_test_check: { environment: 'test' } };
 const headers = { Authorization: 'Bearer sk_test_check', 'Content-Type': 'application/json' };
@@ -11,9 +12,12 @@ function createTestApp() {
 
 describe('Authorization check + role assignment routes', () => {
   let app: ReturnType<typeof createTestApp>['app'];
+  let store: Store;
 
   beforeEach(() => {
-    app = createTestApp().app;
+    const server = createTestApp();
+    app = server.app;
+    store = server.store;
   });
 
   const req = (path: string, init?: RequestInit) => app.request(path, { headers, ...init });
@@ -328,6 +332,235 @@ describe('Authorization check + role assignment routes', () => {
     const body = await json(res);
     expect(body.data.length).toBe(1);
     expect(body.data[0].external_id).toBe('res1');
+  });
+
+  async function setupWithResource() {
+    const ctx = await setup();
+    const resourceRes = await req('/authorization/resources', {
+      method: 'POST',
+      body: JSON.stringify({ resource_type_slug: 'doc', external_id: 'doc-1', organization_id: ctx.org.id }),
+    });
+    const resource = await json(resourceRes);
+    return { ...ctx, resource };
+  }
+
+  it('lists effective permissions on a resource by external id', async () => {
+    const { membership } = await setupWithResource();
+
+    const res = await req(`/authorization/organization_memberships/${membership.id}/resources/doc/doc-1/permissions`);
+    expect(res.status).toBe(200);
+    const body = await json(res);
+    expect(body.object).toBe('list');
+    expect(body.data.map((p: any) => p.slug).sort()).toEqual(['posts:read', 'posts:write']);
+    expect(body.data[0].object).toBe('permission');
+    expect(body.data[0].id).toBeDefined();
+  });
+
+  it('includes permissions from additional role assignments in effective permissions', async () => {
+    const { membership, adminRole } = await setupWithResource();
+
+    await req(`/authorization/organization_memberships/${membership.id}/role_assignments`, {
+      method: 'POST',
+      body: JSON.stringify({ role_id: adminRole.id }),
+    });
+
+    const res = await req(`/authorization/organization_memberships/${membership.id}/resources/doc/doc-1/permissions`);
+    const body = await json(res);
+    expect(body.data.map((p: any) => p.slug).sort()).toEqual(['admin:manage', 'posts:read', 'posts:write']);
+  });
+
+  it('lists effective permissions addressing the resource by id', async () => {
+    const { membership, resource } = await setupWithResource();
+
+    const res = await req(
+      `/authorization/organization_memberships/${membership.id}/resources/${resource.id}/permissions`,
+    );
+    expect(res.status).toBe(200);
+    const body = await json(res);
+    expect(body.data.map((p: any) => p.slug).sort()).toEqual(['posts:read', 'posts:write']);
+  });
+
+  it('lists effective permissions via the resource-centric route', async () => {
+    const { membership, resource } = await setupWithResource();
+
+    const res = await req(
+      `/authorization/resources/${resource.id}/organization_memberships/${membership.id}/permissions`,
+    );
+    expect(res.status).toBe(200);
+    const body = await json(res);
+    expect(body.data.map((p: any) => p.slug).sort()).toEqual(['posts:read', 'posts:write']);
+  });
+
+  it('returns 404 via the resource-centric route for an unknown resource', async () => {
+    const { membership } = await setupWithResource();
+    const res = await req(
+      `/authorization/resources/res_nonexistent/organization_memberships/${membership.id}/permissions`,
+    );
+    expect(res.status).toBe(404);
+  });
+
+  it('returns 404 via the resource-centric route for an unknown membership', async () => {
+    const { resource } = await setupWithResource();
+    const res = await req(
+      `/authorization/resources/${resource.id}/organization_memberships/om_nonexistent/permissions`,
+    );
+    expect(res.status).toBe(404);
+  });
+
+  it('paginates effective permissions', async () => {
+    const { membership } = await setupWithResource();
+
+    const res = await req(
+      `/authorization/organization_memberships/${membership.id}/resources/doc/doc-1/permissions?limit=1`,
+    );
+    const body = await json(res);
+    expect(body.data.length).toBe(1);
+    expect(body.list_metadata.after).toBeTruthy();
+  });
+
+  it('returns 404 for effective permissions with an unknown membership', async () => {
+    await setupWithResource();
+    const res = await req('/authorization/organization_memberships/om_nonexistent/resources/doc/doc-1/permissions');
+    expect(res.status).toBe(404);
+  });
+
+  it('returns 404 for effective permissions on an unknown resource', async () => {
+    const { membership } = await setupWithResource();
+    const res = await req(`/authorization/organization_memberships/${membership.id}/resources/doc/nope/permissions`);
+    expect(res.status).toBe(404);
+  });
+
+  it('returns 404 for effective permissions on a resource in another organization', async () => {
+    const { membership } = await setupWithResource();
+
+    const otherOrgRes = await req('/organizations', {
+      method: 'POST',
+      body: JSON.stringify({ name: 'Other Org' }),
+    });
+    const otherOrg = await json(otherOrgRes);
+    const resourceRes = await req('/authorization/resources', {
+      method: 'POST',
+      body: JSON.stringify({ resource_type_slug: 'doc', external_id: 'other-doc', organization_id: otherOrg.id }),
+    });
+    const otherResource = await json(resourceRes);
+
+    const res = await req(
+      `/authorization/organization_memberships/${membership.id}/resources/${otherResource.id}/permissions`,
+    );
+    expect(res.status).toBe(404);
+  });
+
+  it('resolves an external id collision to the resource in the membership organization', async () => {
+    const ctx = await setup();
+
+    // Another org registers the same type slug + external id first
+    const otherOrgRes = await req('/organizations', {
+      method: 'POST',
+      body: JSON.stringify({ name: 'Other Org' }),
+    });
+    const otherOrg = await json(otherOrgRes);
+    await req('/authorization/resources', {
+      method: 'POST',
+      body: JSON.stringify({ resource_type_slug: 'doc', external_id: 'doc-1', organization_id: otherOrg.id }),
+    });
+
+    await req('/authorization/resources', {
+      method: 'POST',
+      body: JSON.stringify({ resource_type_slug: 'doc', external_id: 'doc-1', organization_id: ctx.org.id }),
+    });
+
+    const res = await req(
+      `/authorization/organization_memberships/${ctx.membership.id}/resources/doc/doc-1/permissions`,
+    );
+    expect(res.status).toBe(200);
+    const body = await json(res);
+    expect(body.data.map((p: any) => p.slug).sort()).toEqual(['posts:read', 'posts:write']);
+  });
+
+  it('prefers an organization role over an environment role with the same slug', async () => {
+    const { org, membership } = await setupWithResource();
+
+    // Org-scoped 'editor' role with narrower permissions than the environment 'editor'
+    await req(`/authorization/organizations/${org.id}/roles`, {
+      method: 'POST',
+      body: JSON.stringify({ slug: 'editor', name: 'Org Editor' }),
+    });
+    await req(`/authorization/organizations/${org.id}/roles/editor/permissions`, {
+      method: 'POST',
+      body: JSON.stringify({ permissions: ['posts:read'] }),
+    });
+
+    const res = await req(`/authorization/organization_memberships/${membership.id}/resources/doc/doc-1/permissions`);
+    expect(res.status).toBe(200);
+    const body = await json(res);
+    expect(body.data.map((p: any) => p.slug)).toEqual(['posts:read']);
+
+    // The shadowing applies to /check as well — same helper
+    const checkRes = await req(`/authorization/organization_memberships/${membership.id}/check`, {
+      method: 'POST',
+      body: JSON.stringify({ permission: 'posts:write' }),
+    });
+    const checkBody = await json(checkRes);
+    expect(checkBody.authorized).toBe(false);
+  });
+
+  it('ignores a foreign organization role seeded with an environment type', async () => {
+    const ctx = await setup();
+    const ws = getWorkOSStore(store);
+
+    const otherOrgRes = await req('/organizations', {
+      method: 'POST',
+      body: JSON.stringify({ name: 'Other Org' }),
+    });
+    const otherOrg = await json(otherOrgRes);
+
+    // Seed normalization allows an organization-owned role whose type
+    // defaulted to EnvironmentRole. One from another org must not satisfy
+    // the environment fallback.
+    const phantomRole = ws.roles.insert({
+      object: 'role',
+      slug: 'phantom',
+      name: 'Phantom',
+      description: null,
+      type: 'EnvironmentRole',
+      organization_id: otherOrg.id,
+      is_default_role: false,
+      priority: 0,
+    });
+    const adminPerm = ws.permissions.findOneBy('slug', 'admin:manage')!;
+    ws.rolePermissions.insert({ role_id: phantomRole.id, permission_id: adminPerm.id });
+
+    const phantomMembership = ws.organizationMemberships.insert({
+      object: 'organization_membership',
+      organization_id: ctx.org.id,
+      user_id: ctx.user.id,
+      role: { slug: 'phantom' },
+      status: 'active',
+      external_id: null,
+      metadata: {},
+    });
+
+    const res = await req(`/authorization/organization_memberships/${phantomMembership.id}/check`, {
+      method: 'POST',
+      body: JSON.stringify({ permission: 'admin:manage' }),
+    });
+    expect(res.status).toBe(200);
+    const body = await json(res);
+    expect(body.authorized).toBe(false);
+
+    // Assigning that foreign role by slug must not resolve it either
+    const assignRes = await req(`/authorization/organization_memberships/${ctx.membership.id}/role_assignments`, {
+      method: 'POST',
+      body: JSON.stringify({ role_slug: 'phantom' }),
+    });
+    expect(assignRes.status).toBe(404);
+
+    // Nor by the compatibility role_id path
+    const assignByIdRes = await req(`/authorization/organization_memberships/${ctx.membership.id}/role_assignments`, {
+      method: 'POST',
+      body: JSON.stringify({ role_id: phantomRole.id }),
+    });
+    expect(assignByIdRes.status).toBe(404);
   });
 
   it('returns 404 for nonexistent membership', async () => {
