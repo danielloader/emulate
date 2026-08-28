@@ -35,6 +35,7 @@ describe('Authorization resource routes', () => {
         resource_type_slug: 'document',
         external_id: 'doc-123',
         organization_id: org.id,
+        name: 'doc-123',
       }),
     });
     expect(res.status).toBe(201);
@@ -58,11 +59,11 @@ describe('Authorization resource routes', () => {
     const org = await createOrg('List Org');
     await req('/authorization/resources', {
       method: 'POST',
-      body: JSON.stringify({ resource_type_slug: 'doc', external_id: '1', organization_id: org.id }),
+      body: JSON.stringify({ resource_type_slug: 'doc', external_id: '1', organization_id: org.id, name: '1' }),
     });
     await req('/authorization/resources', {
       method: 'POST',
-      body: JSON.stringify({ resource_type_slug: 'doc', external_id: '2', organization_id: org.id }),
+      body: JSON.stringify({ resource_type_slug: 'doc', external_id: '2', organization_id: org.id, name: '2' }),
     });
 
     const res = await req('/authorization/resources');
@@ -76,11 +77,11 @@ describe('Authorization resource routes', () => {
     const org2 = await createOrg('Filter Org2');
     await req('/authorization/resources', {
       method: 'POST',
-      body: JSON.stringify({ resource_type_slug: 'doc', external_id: '1', organization_id: org1.id }),
+      body: JSON.stringify({ resource_type_slug: 'doc', external_id: '1', organization_id: org1.id, name: '1' }),
     });
     await req('/authorization/resources', {
       method: 'POST',
-      body: JSON.stringify({ resource_type_slug: 'doc', external_id: '2', organization_id: org2.id }),
+      body: JSON.stringify({ resource_type_slug: 'doc', external_id: '2', organization_id: org2.id, name: '2' }),
     });
 
     const res = await req(`/authorization/resources?organization_id=${org1.id}`);
@@ -93,7 +94,7 @@ describe('Authorization resource routes', () => {
     const org = await createOrg('Get Org');
     const createRes = await req('/authorization/resources', {
       method: 'POST',
-      body: JSON.stringify({ resource_type_slug: 'doc', external_id: 'get1', organization_id: org.id }),
+      body: JSON.stringify({ resource_type_slug: 'doc', external_id: 'get1', organization_id: org.id, name: 'get1' }),
     });
     const resource = await json(createRes);
 
@@ -107,7 +108,7 @@ describe('Authorization resource routes', () => {
     const org = await createOrg('Upd Org');
     const createRes = await req('/authorization/resources', {
       method: 'POST',
-      body: JSON.stringify({ resource_type_slug: 'doc', external_id: 'upd1', organization_id: org.id }),
+      body: JSON.stringify({ resource_type_slug: 'doc', external_id: 'upd1', organization_id: org.id, name: 'upd1' }),
     });
     const resource = await json(createRes);
 
@@ -124,7 +125,7 @@ describe('Authorization resource routes', () => {
     const org = await createOrg('Del Org');
     const createRes = await req('/authorization/resources', {
       method: 'POST',
-      body: JSON.stringify({ resource_type_slug: 'doc', external_id: 'del1', organization_id: org.id }),
+      body: JSON.stringify({ resource_type_slug: 'doc', external_id: 'del1', organization_id: org.id, name: 'del1' }),
     });
     const resource = await json(createRes);
 
@@ -139,7 +140,12 @@ describe('Authorization resource routes', () => {
     const org = await createOrg('TypeExt Org');
     await req('/authorization/resources', {
       method: 'POST',
-      body: JSON.stringify({ resource_type_slug: 'project', external_id: 'proj-42', organization_id: org.id }),
+      body: JSON.stringify({
+        resource_type_slug: 'project',
+        external_id: 'proj-42',
+        organization_id: org.id,
+        name: 'proj-42',
+      }),
     });
 
     const res = await req(`/authorization/organizations/${org.id}/resources/project/proj-42`);
@@ -147,6 +153,356 @@ describe('Authorization resource routes', () => {
     const resource = await json(res);
     expect(resource.resource_type_slug).toBe('project');
     expect(resource.external_id).toBe('proj-42');
+  });
+
+  it('returns the production shape keys with null defaults', async () => {
+    const org = await createOrg('Shape Org');
+    const res = await req('/authorization/resources', {
+      method: 'POST',
+      body: JSON.stringify({
+        resource_type_slug: 'doc',
+        external_id: 'shape-1',
+        organization_id: org.id,
+        name: 'shape-1',
+      }),
+    });
+    const resource = await json(res);
+    expect(resource.name).toBe('shape-1');
+    expect(resource.description).toBeNull();
+    expect(resource.parent_resource_id).toBeNull();
+  });
+
+  it('requires name when creating a resource', async () => {
+    const org = await createOrg('NoName Org');
+    const res = await req('/authorization/resources', {
+      method: 'POST',
+      body: JSON.stringify({ resource_type_slug: 'doc', external_id: 'no-name', organization_id: org.id }),
+    });
+    expect(res.status).toBe(422);
+    const error = await json(res);
+    expect(error.errors).toEqual([{ field: 'name', code: 'required' }]);
+  });
+
+  it('persists name and description', async () => {
+    const org = await createOrg('Named Org');
+    const res = await req('/authorization/resources', {
+      method: 'POST',
+      body: JSON.stringify({
+        resource_type_slug: 'workspace',
+        external_id: 'ws-1',
+        organization_id: org.id,
+        name: 'Acme Workspace',
+        description: 'Primary workspace',
+      }),
+    });
+    expect(res.status).toBe(201);
+    const resource = await json(res);
+    expect(resource.name).toBe('Acme Workspace');
+    expect(resource.description).toBe('Primary workspace');
+  });
+
+  it('returns 409 when the same external_id is created twice', async () => {
+    const org = await createOrg('Dup Org');
+    const body = JSON.stringify({
+      resource_type_slug: 'doc',
+      external_id: 'dup-1',
+      organization_id: org.id,
+      name: 'dup-1',
+    });
+
+    const first = await req('/authorization/resources', { method: 'POST', body });
+    expect(first.status).toBe(201);
+
+    const second = await req('/authorization/resources', { method: 'POST', body });
+    expect(second.status).toBe(409);
+    const error = await json(second);
+    expect(error.code).toBe('authorization_resource_external_id_conflict');
+
+    const list = await req(`/authorization/resources?organization_id=${org.id}`);
+    expect((await json(list)).data.length).toBe(1);
+  });
+
+  it('allows the same external_id in another organization or resource type', async () => {
+    const org1 = await createOrg('DupScope Org1');
+    const org2 = await createOrg('DupScope Org2');
+
+    const inOrg1 = await req('/authorization/resources', {
+      method: 'POST',
+      body: JSON.stringify({
+        resource_type_slug: 'doc',
+        external_id: 'shared',
+        organization_id: org1.id,
+        name: 'shared',
+      }),
+    });
+    expect(inOrg1.status).toBe(201);
+
+    const inOrg2 = await req('/authorization/resources', {
+      method: 'POST',
+      body: JSON.stringify({
+        resource_type_slug: 'doc',
+        external_id: 'shared',
+        organization_id: org2.id,
+        name: 'shared',
+      }),
+    });
+    expect(inOrg2.status).toBe(201);
+
+    const otherType = await req('/authorization/resources', {
+      method: 'POST',
+      body: JSON.stringify({
+        resource_type_slug: 'folder',
+        external_id: 'shared',
+        organization_id: org1.id,
+        name: 'shared',
+      }),
+    });
+    expect(otherType.status).toBe(201);
+  });
+
+  it('creates a nested resource via parent_resource_id', async () => {
+    const org = await createOrg('Nest Org');
+    const parentRes = await req('/authorization/resources', {
+      method: 'POST',
+      body: JSON.stringify({
+        resource_type_slug: 'workspace',
+        external_id: 'ws-1',
+        organization_id: org.id,
+        name: 'ws-1',
+      }),
+    });
+    const parent = await json(parentRes);
+
+    const childRes = await req('/authorization/resources', {
+      method: 'POST',
+      body: JSON.stringify({
+        resource_type_slug: 'project',
+        external_id: 'proj-1',
+        organization_id: org.id,
+        name: 'proj-1',
+        parent_resource_id: parent.id,
+      }),
+    });
+    expect(childRes.status).toBe(201);
+    expect((await json(childRes)).parent_resource_id).toBe(parent.id);
+  });
+
+  it('creates a nested resource via parent external id + type slug', async () => {
+    const org = await createOrg('NestExt Org');
+    const parentRes = await req('/authorization/resources', {
+      method: 'POST',
+      body: JSON.stringify({
+        resource_type_slug: 'workspace',
+        external_id: 'ws-2',
+        organization_id: org.id,
+        name: 'ws-2',
+      }),
+    });
+    const parent = await json(parentRes);
+
+    const childRes = await req('/authorization/resources', {
+      method: 'POST',
+      body: JSON.stringify({
+        resource_type_slug: 'project',
+        external_id: 'proj-2',
+        organization_id: org.id,
+        name: 'proj-2',
+        parent_resource_external_id: 'ws-2',
+        parent_resource_type_slug: 'workspace',
+      }),
+    });
+    expect(childRes.status).toBe(201);
+    expect((await json(childRes)).parent_resource_id).toBe(parent.id);
+  });
+
+  it('returns 404 for an unknown parent and 422 for an incomplete parent pair', async () => {
+    const org = await createOrg('NestErr Org');
+
+    const unknownParent = await req('/authorization/resources', {
+      method: 'POST',
+      body: JSON.stringify({
+        resource_type_slug: 'project',
+        external_id: 'proj-3',
+        organization_id: org.id,
+        name: 'proj-3',
+        parent_resource_id: 'auth_res_nonexistent',
+      }),
+    });
+    expect(unknownParent.status).toBe(404);
+
+    const incompletePair = await req('/authorization/resources', {
+      method: 'POST',
+      body: JSON.stringify({
+        resource_type_slug: 'project',
+        external_id: 'proj-3',
+        organization_id: org.id,
+        name: 'proj-3',
+        parent_resource_external_id: 'ws-1',
+      }),
+    });
+    expect(incompletePair.status).toBe(422);
+  });
+
+  it('updates name, description, and parent', async () => {
+    const org = await createOrg('UpdFields Org');
+    const parentRes = await req('/authorization/resources', {
+      method: 'POST',
+      body: JSON.stringify({
+        resource_type_slug: 'workspace',
+        external_id: 'ws-3',
+        organization_id: org.id,
+        name: 'ws-3',
+      }),
+    });
+    const parent = await json(parentRes);
+    const createRes = await req('/authorization/resources', {
+      method: 'POST',
+      body: JSON.stringify({
+        resource_type_slug: 'project',
+        external_id: 'proj-4',
+        organization_id: org.id,
+        name: 'proj-4',
+      }),
+    });
+    const resource = await json(createRes);
+
+    const res = await req(`/authorization/resources/${resource.id}`, {
+      method: 'PUT',
+      body: JSON.stringify({ name: 'Renamed', description: 'Now nested', parent_resource_id: parent.id }),
+    });
+    expect(res.status).toBe(200);
+    const updated = await json(res);
+    expect(updated.name).toBe('Renamed');
+    expect(updated.description).toBe('Now nested');
+    expect(updated.parent_resource_id).toBe(parent.id);
+
+    // Detach again
+    const detached = await json(
+      await req(`/authorization/resources/${resource.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ parent_resource_id: null }),
+      }),
+    );
+    expect(detached.parent_resource_id).toBeNull();
+  });
+
+  it('rejects parent updates that would create a cycle', async () => {
+    const org = await createOrg('Cycle Org');
+    const create = async (externalId: string, parentResourceId?: string) =>
+      json(
+        await req('/authorization/resources', {
+          method: 'POST',
+          body: JSON.stringify({
+            resource_type_slug: 'project',
+            external_id: externalId,
+            organization_id: org.id,
+            name: externalId,
+            ...(parentResourceId ? { parent_resource_id: parentResourceId } : {}),
+          }),
+        }),
+      );
+
+    const root = await create('cyc-root');
+    const child = await create('cyc-child', root.id);
+    const grandchild = await create('cyc-grandchild', child.id);
+
+    const selfParent = await req(`/authorization/resources/${root.id}`, {
+      method: 'PUT',
+      body: JSON.stringify({ parent_resource_id: root.id }),
+    });
+    expect(selfParent.status).toBe(422);
+
+    const descendantParent = await req(`/authorization/resources/${root.id}`, {
+      method: 'PUT',
+      body: JSON.stringify({ parent_resource_id: grandchild.id }),
+    });
+    expect(descendantParent.status).toBe(422);
+
+    // The hierarchy is left untouched by the rejected updates.
+    const unchanged = await json(await req(`/authorization/resources/${root.id}`));
+    expect(unchanged.parent_resource_id).toBeNull();
+  });
+
+  it('refuses to delete a resource with dependents unless cascade_delete is set', async () => {
+    const org = await createOrg('Cascade Org');
+    const parent = await json(
+      await req('/authorization/resources', {
+        method: 'POST',
+        body: JSON.stringify({
+          resource_type_slug: 'workspace',
+          external_id: 'casc-ws',
+          organization_id: org.id,
+          name: 'casc-ws',
+        }),
+      }),
+    );
+    const child = await json(
+      await req('/authorization/resources', {
+        method: 'POST',
+        body: JSON.stringify({
+          resource_type_slug: 'project',
+          external_id: 'casc-proj',
+          organization_id: org.id,
+          name: 'casc-proj',
+          parent_resource_id: parent.id,
+        }),
+      }),
+    );
+
+    const refused = await req(`/authorization/resources/${parent.id}`, { method: 'DELETE' });
+    expect(refused.status).toBe(409);
+    expect((await json(refused)).code).toBe('resource_has_dependents');
+    expect((await req(`/authorization/resources/${child.id}`)).status).toBe(200);
+
+    const cascaded = await req(`/authorization/resources/${parent.id}?cascade_delete=true`, { method: 'DELETE' });
+    expect(cascaded.status).toBe(204);
+    expect((await req(`/authorization/resources/${parent.id}`)).status).toBe(404);
+    expect((await req(`/authorization/resources/${child.id}`)).status).toBe(404);
+  });
+
+  it('filters resources by external id and parent', async () => {
+    const org = await createOrg('ListFilter Org');
+    const parent = await json(
+      await req('/authorization/resources', {
+        method: 'POST',
+        body: JSON.stringify({
+          resource_type_slug: 'workspace',
+          external_id: 'ws-4',
+          organization_id: org.id,
+          name: 'ws-4',
+        }),
+      }),
+    );
+    await req('/authorization/resources', {
+      method: 'POST',
+      body: JSON.stringify({
+        resource_type_slug: 'project',
+        external_id: 'proj-5',
+        organization_id: org.id,
+        name: 'proj-5',
+        parent_resource_id: parent.id,
+      }),
+    });
+    await req('/authorization/resources', {
+      method: 'POST',
+      body: JSON.stringify({
+        resource_type_slug: 'project',
+        external_id: 'proj-6',
+        organization_id: org.id,
+        name: 'proj-6',
+      }),
+    });
+
+    const byExternalId = await json(await req('/authorization/resources?resource_external_id=proj-5'));
+    expect(byExternalId.data.map((r: any) => r.external_id)).toEqual(['proj-5']);
+
+    const byParentId = await json(await req(`/authorization/resources?parent_resource_id=${parent.id}`));
+    expect(byParentId.data.map((r: any) => r.external_id)).toEqual(['proj-5']);
+
+    const byParentExternal = await json(
+      await req('/authorization/resources?parent_resource_type_slug=workspace&parent_external_id=ws-4'),
+    );
+    expect(byParentExternal.data.map((r: any) => r.external_id)).toEqual(['proj-5']);
   });
 
   it('lists memberships for a resource', async () => {
@@ -165,7 +521,7 @@ describe('Authorization resource routes', () => {
     // Create resource
     const resCreate = await req('/authorization/resources', {
       method: 'POST',
-      body: JSON.stringify({ resource_type_slug: 'doc', external_id: 'mem1', organization_id: org.id }),
+      body: JSON.stringify({ resource_type_slug: 'doc', external_id: 'mem1', organization_id: org.id, name: 'mem1' }),
     });
     const resource = await json(resCreate);
 
