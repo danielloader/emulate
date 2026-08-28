@@ -165,7 +165,7 @@ export const FEATURES: FeatureDef[] = [
   {
     name: 'Vault',
     tags: ['vault'],
-    notes: 'Not implemented.',
+    notes: 'Object CRUD is implemented; data-key encryption endpoints are not.',
   },
   {
     name: 'Feature Flags',
