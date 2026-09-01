@@ -70,13 +70,17 @@ describe('Feature Flags routes', () => {
     });
   }
 
-  function seedMembership(organizationId: string, userId: string) {
+  function seedMembership(
+    organizationId: string,
+    userId: string,
+    status: 'active' | 'inactive' | 'pending' = 'active',
+  ) {
     return getWorkOSStore(store).organizationMemberships.insert({
       object: 'organization_membership',
       organization_id: organizationId,
       user_id: userId,
       role: { slug: 'member' },
-      status: 'active',
+      status,
       external_id: null,
       metadata: {},
     });
@@ -403,6 +407,23 @@ describe('Feature Flags routes', () => {
       const list = await json(await req(`/user_management/users/${user.id}/feature-flags`));
       expect(list.data.map((f: any) => f.slug).sort()).toEqual(['org-targeted', 'user-targeted']);
     });
+
+    for (const status of ['inactive', 'pending'] as const) {
+      it(`does not inherit organization targets through a ${status} membership`, async () => {
+        seedFlag('org-targeted', { default_value: false });
+        const user = seedUser();
+        const org = seedOrg();
+        seedMembership(org.id, user.id, status);
+        await req(`/feature-flags/org-targeted/targets/${org.id}`, { method: 'POST' });
+
+        // authenticate refuses to scope a session to a non-active membership, so a flag
+        // reported here could never appear in that user's token claim.
+        expect((await json(await req(`/user_management/users/${user.id}/feature-flags`))).data).toEqual([]);
+        // The organization itself still sees it — only the inheritance is gated.
+        const orgList = await json(await req(`/organizations/${org.id}/feature-flags`));
+        expect(orgList.data.map((f: any) => f.slug)).toEqual(['org-targeted']);
+      });
+    }
 
     it('omits a disabled flag even from a resource it targets', async () => {
       seedFlag('disabled-flag', { enabled: false, default_value: true });

@@ -261,6 +261,15 @@ describe('Seeding feature flags', () => {
     ]);
   });
 
+  it('reports a null feature-flag entry rather than throwing', () => {
+    // An empty YAML list item parses as null; --validate-config must report it, not stack-trace.
+    const run = () => validateSeedConfig({ featureFlags: [null as unknown as { slug: string }] });
+    expect(run).not.toThrow();
+    const { valid, errors } = run();
+    expect(valid).toBe(false);
+    expect(errors.find((e) => e.path === 'featureFlags[0]')).toBeDefined();
+  });
+
   it('rejects a duplicate slug', () => {
     const { valid, errors } = validateSeedConfig({
       featureFlags: [{ slug: 'dupe' }, { slug: 'dupe' }],

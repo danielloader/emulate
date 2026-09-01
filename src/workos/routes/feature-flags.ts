@@ -38,9 +38,17 @@ function flagIsOn(ws: WorkOSStore, flag: WorkOSFeatureFlag, resourceIds: string[
   return isTargeted(ws, flag.slug, resourceIds) || flag.default_value === true;
 }
 
-/** The organizations a user is a member of, whose targets a user inherits. */
+/**
+ * The organizations whose targets a user inherits: active memberships only. A `pending` member
+ * has not joined yet and an `inactive` one has been removed, and authenticate gates organization
+ * scoping on the same status — so counting either here would report a flag through an
+ * organization no session of that user's can ever be scoped to.
+ */
 export function organizationIdsForUser(ws: WorkOSStore, userId: string): string[] {
-  return ws.organizationMemberships.findBy('user_id', userId).map((m) => m.organization_id);
+  return ws.organizationMemberships
+    .findBy('user_id', userId)
+    .filter((m) => m.status === 'active')
+    .map((m) => m.organization_id);
 }
 
 /** Flags resolving on for the given resource ids, newest first, as whole `Flag` objects. */

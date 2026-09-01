@@ -586,7 +586,9 @@ Three surfaces read the result, and all three resolve through the same rule:
 - **The list endpoints an SDK polls** — `GET /user_management/users/{id}/feature-flags` and
   `GET /organizations/{id}/feature-flags`. Both return a paginated list of whole `feature_flag`
   objects, and both list only the flags that are on. The user endpoint includes flags from every
-  organization that user is a member of, as production documents.
+  organization the user is an _active_ member of, as production documents — a `pending` or
+  `inactive` membership grants nothing, matching the status check `authenticate` applies before
+  scoping a session to an organization.
 
 ```ts
 const { data } = await workos.featureFlags.listUserFeatureFlags({ userId: user.id });
@@ -612,7 +614,7 @@ All three apply the same rule — a disabled flag is off for everyone; otherwise
 target wins; otherwise `default_value` — so for one resource they agree. They are scoped
 differently on purpose, and that is the one case where they legitimately differ: the token claim
 covers the user plus the session's organization, while the user list endpoint covers the user plus
-_every_ organization they belong to. A user in two organizations can therefore have a flag in the
+_every_ organization they are an active member of. A user in two organizations can therefore have a flag in the
 list endpoint that is absent from a token scoped to the other organization. Production scopes them
 the same way.
 

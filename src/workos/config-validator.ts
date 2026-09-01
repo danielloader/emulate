@@ -827,6 +827,13 @@ export function validateSeedConfig(config: WorkOSSeedConfig): ConfigValidationRe
       config.featureFlags.forEach((flag, index) => {
         const at = (field: string) => `featureFlags[${index}].${field}`;
 
+        // A YAML list item left empty parses as null, which every field check below would
+        // dereference. Reported as a validation error so `--validate-config` stays useful.
+        if (flag === null || typeof flag !== 'object' || Array.isArray(flag)) {
+          errors.push({ path: `featureFlags[${index}]`, message: 'each feature flag must be an object', value: flag });
+          return;
+        }
+
         if (flag.id !== undefined) {
           if (typeof flag.id !== 'string' || !PINNED_ID_PATTERN.test(flag.id)) {
             errors.push({
