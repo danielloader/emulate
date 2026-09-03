@@ -9,6 +9,14 @@ import type { ServicePlugin, RouteContext } from './plugin.js';
 
 export interface ServerOptions {
   port?: number;
+  /**
+   * The externally reachable root at which the emulator's routes are served. Every link the
+   * emulator mints — invitation, password reset, device verification, SSO logout — and the default
+   * `iss` is `${baseUrl}/<route>`, while the routes themselves are mounted at `/`. A trailing slash
+   * is therefore dropped (it would double in every link), and a path prefix is kept as the caller's
+   * statement that the emulator is served under it: a proxy fronting it there must strip the prefix
+   * before forwarding, or the minted links will not resolve. Defaults to `http://localhost:{port}`.
+   */
   baseUrl?: string;
   apiKeys?: ApiKeyMap;
   /**
@@ -26,7 +34,10 @@ export interface ServerOptions {
 
 export function createServer(plugin: ServicePlugin, options: ServerOptions = {}) {
   const port = options.port ?? 4100;
-  const baseUrl = options.baseUrl ?? `http://localhost:${port}`;
+  // Every link the emulator mints is `${baseUrl}/<route>`, so a trailing slash on the option would
+  // double up in all of them (and in the default `iss`, built the same way). A path prefix is kept:
+  // see ServerOptions.baseUrl for the contract it states.
+  const baseUrl = (options.baseUrl ?? `http://localhost:${port}`).replace(/\/+$/, '');
 
   const app = new Hono<WorkOSAppEnv>();
   const store = new Store();
