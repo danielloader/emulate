@@ -2,24 +2,17 @@ import { describe, it, expect, beforeEach } from 'bun:test';
 import { createServer, type ApiKeyMap, type Store } from '../../core/index.js';
 import { workosPlugin } from '../index.js';
 import { getWorkOSStore } from '../store.js';
+import { RESPONSE_SHAPE_REQUIREMENTS } from '../generated/response-shapes.js';
 
 const apiKeys: ApiKeyMap = { sk_test_org: { environment: 'test' } };
 const headers = { Authorization: 'Bearer sk_test_org', 'Content-Type': 'application/json' };
 
-/** Every key the spec marks required on a `Flag`. A strict SDK deserializer faults on any omission. */
-const FLAG_KEYS = [
-  'object',
-  'id',
-  'slug',
-  'name',
-  'description',
-  'owner',
-  'tags',
-  'enabled',
-  'default_value',
-  'created_at',
-  'updated_at',
-];
+/**
+ * Every key the spec marks required on a `Flag`, from the generated catalog rather than a
+ * hand-copied list: a strict SDK deserializer faults on any omission, and a spec change to
+ * `Flag` must fail here rather than drift past a literal.
+ */
+const FLAG_KEYS = RESPONSE_SHAPE_REQUIREMENTS.feature_flag.required;
 
 function createTestApp() {
   return createServer(workosPlugin, { port: 0, baseUrl: 'http://localhost:0', apiKeys });
@@ -267,9 +260,10 @@ describe('Feature Flags routes', () => {
         configured_targets: { organizations: [{ id: org.id, name: 'Acme' }], users: [] },
       });
       // The spec marks previous_attributes required on this event; before the target existed
-      // the flag reached nobody.
-      expect(events[0].context).toMatchObject({
-        previous_attributes: { context: { access_type: 'none', configured_targets: { organizations: [] } } },
+      // the flag reached nobody. Only the rule changed, so `data` is absent rather than
+      // restating the flag's unchanged attributes as "previous".
+      expect(events[0].context!.previous_attributes).toEqual({
+        context: { access_type: 'none', configured_targets: { organizations: [], users: [] } },
       });
     });
 
@@ -301,6 +295,57 @@ describe('Feature Flags routes', () => {
       const org = seedOrg('Acme');
       await req(`/feature-flags/beta/targets/${org.id}`, { method: 'POST' });
       expect(ruleEvents()[0].context).toMatchObject({ access_type: 'all' });
+    });
+
+    it('names the calling API key as the flag.rule_updated actor when the key has a record', async () => {
+      seedFlag('beta', { default_value: false });
+      const org = seedOrg('Acme');
+      const record = getWorkOSStore(store).apiKeyRecords.insert({
+        object: 'api_key',
+        name: 'CI key',
+        key: 'sk_test_org',
+        environment: 'test',
+        owner: { type: 'organization', id: org.id },
+        permissions: [],
+        last_used_at: null,
+        expires_at: null,
+      });
+
+      await req(`/feature-flags/beta/targets/${org.id}`, { method: 'POST' });
+      expect(ruleEvents()[0].context).toMatchObject({
+        client_id: 'workos-emulate',
+        actor: { id: record.id, source: 'api', name: 'CI key' },
+      });
+    });
+
+    it('falls back to the placeholder actor when the calling key has no record', async () => {
+      // A map-form apiKeys entry authenticates but has no api_key resource behind it.
+      seedFlag('beta', { default_value: false });
+      const org = seedOrg('Acme');
+      await req(`/feature-flags/beta/targets/${org.id}`, { method: 'POST' });
+      expect(ruleEvents()[0].context).toMatchObject({
+        actor: { id: 'api_key_emulator', source: 'api', name: 'Emulator API key' },
+      });
+    });
+
+    it("drops a user's targets when the user is deleted", async () => {
+      seedFlag('beta', { default_value: false });
+      const user = seedUser();
+      await req(`/feature-flags/beta/targets/${user.id}`, { method: 'POST' });
+
+      expect((await req(`/user_management/users/${user.id}`, { method: 'DELETE' })).status).toBe(204);
+      expect(getWorkOSStore(store).flagTargets.all()).toEqual([]);
+      const body = await json(await req('/sdk/feature-flags'));
+      expect(body.beta.targets.users).toEqual([]);
+    });
+
+    it("drops an organization's targets when the organization is deleted", async () => {
+      seedFlag('beta', { default_value: false });
+      const org = seedOrg();
+      await req(`/feature-flags/beta/targets/${org.id}`, { method: 'POST' });
+
+      expect((await req(`/organizations/${org.id}`, { method: 'DELETE' })).status).toBe(204);
+      expect(getWorkOSStore(store).flagTargets.all()).toEqual([]);
     });
   });
 

@@ -1,7 +1,7 @@
 import { type RouteContext, WorkOSApiError, cursorPaginate, notFound, parseListParams } from '../../core/index.js';
 import { getWorkOSStore, type WorkOSStore } from '../store.js';
 import type { WorkOSFeatureFlag } from '../entities.js';
-import { formatFeatureFlag, formatFeatureFlagEvent, formatListResponse } from '../helpers.js';
+import { apiKeyActor, formatFeatureFlag, formatFeatureFlagEvent, formatListResponse } from '../helpers.js';
 import { environmentIdFor, flagRuleState, flagRuleUpdatedContext } from '../flag-context.js';
 import { EVENTS, STORE_KEYS } from '../constants.js';
 import type { EventBus } from '../event-bus.js';
@@ -82,17 +82,21 @@ export function featureFlagRoutes(ctx: RouteContext): void {
    * this cannot ride on the collection's update hook. `previous` is the rule state captured
    * before the mutation — the spec marks `previous_attributes` required on this event.
    *
+   * The actor is the API key that made the request, resolved the way Vault's `updated_by` is;
+   * this is the one flag event emitted with a request in hand, so it is the one that can say
+   * who acted rather than falling back to the emulator's placeholder key.
+   *
    * The environment is the emulator's default rather than the caller's: flags are not
    * environment-scoped in the store, so reporting the requesting key's environment here would
    * make this event disagree with the collection-hook events about the same flag.
    */
-  const emitRuleUpdated = (flag: WorkOSFeatureFlag, previous: Record<string, unknown>) => {
+  const emitRuleUpdated = (flag: WorkOSFeatureFlag, previous: Record<string, unknown>, apiKey?: string) => {
     const environmentId = environmentIdFor();
     store.getData<EventBus>(STORE_KEYS.eventBus)?.emit({
       event: EVENTS.flagRuleUpdated,
       data: formatFeatureFlagEvent(flag, environmentId),
       environment_id: environmentId,
-      context: flagRuleUpdatedContext(ws, flag, previous),
+      context: flagRuleUpdatedContext(ws, flag, previous, apiKeyActor(ws, apiKey)),
     });
   };
 
@@ -145,12 +149,12 @@ export function featureFlagRoutes(ctx: RouteContext): void {
   // Documented as POST; PUT is accepted too, as the emulator previously exposed it there.
   app.post('/feature-flags/:slug/targets/:resourceId', (c) => {
     const { flag, changed, previous } = addTarget(c.req.param('slug'), c.req.param('resourceId'));
-    if (changed && previous) emitRuleUpdated(flag, previous);
+    if (changed && previous) emitRuleUpdated(flag, previous, c.get('auth')?.apiKey);
     return c.body(null, 204);
   });
   app.put('/feature-flags/:slug/targets/:resourceId', (c) => {
     const { flag, changed, previous } = addTarget(c.req.param('slug'), c.req.param('resourceId'));
-    if (changed && previous) emitRuleUpdated(flag, previous);
+    if (changed && previous) emitRuleUpdated(flag, previous, c.get('auth')?.apiKey);
     return c.body(null, 204);
   });
 
@@ -172,7 +176,7 @@ export function featureFlagRoutes(ctx: RouteContext): void {
     if (target) {
       const previous = flagRuleState(ws, flag);
       ws.flagTargets.delete(target.id);
-      emitRuleUpdated(flag, previous);
+      emitRuleUpdated(flag, previous, c.get('auth')?.apiKey);
     }
     return c.body(null, 204);
   });

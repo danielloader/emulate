@@ -575,7 +575,8 @@ off for everyone until something enables it.
 A flag is on for a resource when it is `enabled` **and** either a target names that resource or
 `default_value` is true. Targeting is additive, as it is in production: `POST
 /feature-flags/{slug}/targets/{resourceId}` carries no body, so a target can turn a flag on but
-never off. Flags also accept an optional `id` to pin (`flag_01ABC…`).
+never off. Flags also accept an optional `id` to pin (`flag_01ABC…`). Slugs must be URL-safe, since
+every route addresses a flag by slug in the path.
 
 Three surfaces read the result, and all three resolve through the same rule:
 
@@ -625,6 +626,13 @@ earlier shape — those aliases are **emulator-only**, and production rejects th
 on them in code you intend to run against real WorkOS. Changes emit `flag.updated`; adding or
 removing a target emits `flag.rule_updated`, carrying the flag's `access_type`, its configured
 targets, and the previous rule state.
+
+`flag.rule_updated` names the API key that made the request as its `actor` when that key has a
+record behind it (an array-form `apiKeys` entry, or a key created over the API); a map-form key
+authenticates but has no record, so the actor falls back to the emulator's placeholder key. The
+collection-level `flag.created` / `flag.updated` / `flag.deleted` events run without request
+context and always report the placeholder. Flags are not environment-scoped, so every flag event
+reports `environment_test`. Deleting a user or organization removes its flag targets.
 
 ## Widgets
 

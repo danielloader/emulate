@@ -307,7 +307,10 @@ export interface WorkOSSeedFeatureFlag {
    * emulator restarts.
    */
   id?: string;
-  /** The key application code references. Required, and unique within the environment. */
+  /**
+   * The key application code references. Required, unique within the environment, and URL-safe:
+   * every route addresses a flag by slug in the path.
+   */
   slug: string;
   /** Display name. Defaults to the slug. */
   name?: string;

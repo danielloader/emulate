@@ -278,6 +278,29 @@ describe('Seeding feature flags', () => {
     expect(errors.find((e) => e.path === 'featureFlags[1].slug')).toBeDefined();
   });
 
+  it('rejects a slug that is not URL-safe', () => {
+    // Every route addresses a flag by slug in the path, so a slug needing percent-encoding
+    // would seed fine and then be unreachable.
+    const { valid, errors } = validateSeedConfig({
+      featureFlags: [{ slug: 'beta/dashboard' }, { slug: 'has space' }, { slug: 'fine-slug_1.0~' }],
+    });
+    expect(valid).toBe(false);
+    expect(errors.map((e) => e.path)).toEqual(['featureFlags[0].slug', 'featureFlags[1].slug']);
+  });
+
+  it('reports a non-string organization target as a type error, not an unknown name', () => {
+    const { valid, errors } = validateSeedConfig({
+      organizations: [{ name: 'Acme Corp' }],
+      featureFlags: [{ slug: 'a', targets: { organizations: [42 as unknown as string] } }],
+    });
+    expect(valid).toBe(false);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({
+      path: 'featureFlags[0].targets.organizations[0]',
+      message: 'targets.organizations entries must be names of organizations defined in `organizations`',
+    });
+  });
+
   it('rejects a non-boolean default_value', () => {
     const { valid, errors } = validateSeedConfig({
       featureFlags: [{ slug: 'typed', default_value: 'variant-a' as unknown as boolean }],

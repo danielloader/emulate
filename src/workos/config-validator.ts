@@ -850,6 +850,14 @@ export function validateSeedConfig(config: WorkOSSeedConfig): ConfigValidationRe
 
         if (!flag.slug || typeof flag.slug !== 'string') {
           errors.push({ path: at('slug'), message: 'slug is required and must be a string', value: flag.slug });
+        } else if (encodeURIComponent(flag.slug) !== flag.slug) {
+          // Every route addresses a flag by slug in the URL path, so a slug that needs
+          // percent-encoding seeds fine and is then unreachable.
+          errors.push({
+            path: at('slug'),
+            message: 'slug must be URL-safe (no spaces, slashes or characters that need percent-encoding)',
+            value: flag.slug,
+          });
         } else if (seenSlugs.has(flag.slug)) {
           // Every lookup is by slug, so a duplicate is a flag no route can ever resolve.
           errors.push({ path: at('slug'), message: 'slug must be unique across featureFlags', value: flag.slug });
@@ -960,6 +968,14 @@ export function validateSeedConfig(config: WorkOSSeedConfig): ConfigValidationRe
 
         const seenTargetOrgs = new Set<string>();
         targetOrgs.forEach((name, i) => {
+          if (typeof name !== 'string') {
+            errors.push({
+              path: at(`targets.organizations[${i}]`),
+              message: 'targets.organizations entries must be names of organizations defined in `organizations`',
+              value: name,
+            });
+            return;
+          }
           if (!orgNames.has(name)) {
             errors.push({
               path: at(`targets.organizations[${i}]`),

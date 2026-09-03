@@ -1005,6 +1005,17 @@ export function formatFeatureFlagEvent(f: WorkOSFeatureFlag, environmentId: stri
   return { object, id, environment_id: environmentId, ...rest };
 }
 
+/**
+ * The actor an API-key request acts as — flag event `context.actor`, Vault `updated_by`. The
+ * key's record when the caller's key has one (an array-form `apiKeys` seed entry, or a key
+ * created over the API), otherwise the emulator's standing placeholder: a map-form `apiKeys`
+ * entry authenticates but has no `api_key` resource behind it, so there is nothing to name.
+ */
+export function apiKeyActor(ws: WorkOSStore, apiKey?: string): { id: string; name: string } {
+  const record = apiKey ? ws.apiKeyRecords.findOneBy('key', apiKey) : undefined;
+  return { id: record?.id ?? 'api_key_emulator', name: record?.name ?? 'Emulator API key' };
+}
+
 /** Generate a Connect Application client_id, e.g. `client_01HXYZ...`. */
 export function generateClientId(): string {
   return `client_${generateId('').slice(1)}`;
