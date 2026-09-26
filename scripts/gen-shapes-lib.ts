@@ -66,9 +66,9 @@ export const OBJECT_SCHEMA_MAP: readonly ShapeMapEntry[] = [
   // depth — enrollment's secrets are pinned by the route tests instead.
   { objectType: 'authentication_factor', schemaName: 'AuthenticationFactor' },
   { objectType: 'authentication_challenge', schemaName: 'AuthenticationChallenge' },
+  { objectType: 'it_contact', schemaName: 'ItContact' },
   // The spec names only the secret-bearing creation shape; the list route's secretless
   // variant is an inline schema, so `secret` is carried as a tracked gap on this entry.
-  { objectType: 'it_contact', schemaName: 'ItContact' },
   { objectType: 'connect_application_secret', schemaName: 'NewConnectApplicationSecret' },
   // `connect_application` is deliberately absent: `ConnectApplication` is an allOf over a
   // four-way oneOf (first-party / dynamically registered / third-party oauth, and m2m), and

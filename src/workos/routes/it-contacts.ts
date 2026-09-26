@@ -4,7 +4,7 @@ import { emailsMatch, formatItContact, requireEmailField } from '../helpers.js';
 import { getWorkOSStore } from '../store.js';
 
 /** The Admin Portal features an invitation may grant, per `InviteItContactDto`. */
-const INVITE_INTENTS = ['sso', 'directory_sync', 'log_streams', 'domain_verification', 'bring_your_own_key'];
+const INVITE_INTENTS = ['sso', 'directory_sync', 'log_streams', 'domain_verification', 'bring_your_own_key'] as const;
 
 export function itContactRoutes(ctx: RouteContext): void {
   const { app, store } = ctx;
@@ -25,11 +25,10 @@ export function itContactRoutes(ctx: RouteContext): void {
   };
 
   const activeInvitation = (organizationId: string) =>
-    ws.itContacts.findBy('organization_id', organizationId).find((c) => c.invited_at !== null);
+    ws.itContacts.findBy('organization_id', organizationId).find((contact) => contact.invited_at !== null);
 
-  // List IT contacts
-  app.get('/organizations/:organization_id/it_contacts', (c) => {
-    const organizationId = c.req.param('organization_id');
+  app.get('/organizations/:organizationId/it_contacts', (c) => {
+    const organizationId = c.req.param('organizationId');
     requireOrganization(organizationId);
     const contacts = ws.itContacts
       .findBy('organization_id', organizationId)
@@ -43,9 +42,8 @@ export function itContactRoutes(ctx: RouteContext): void {
     });
   });
 
-  // Create an IT contact
-  app.post('/organizations/:organization_id/it_contacts', async (c) => {
-    const organizationId = c.req.param('organization_id');
+  app.post('/organizations/:organizationId/it_contacts', async (c) => {
+    const organizationId = c.req.param('organizationId');
     requireOrganization(organizationId);
     const body = await parseJsonBody(c);
 
@@ -53,8 +51,9 @@ export function itContactRoutes(ctx: RouteContext): void {
     // up: a stored typo is an invitation that can never reach anyone.
     const email = requireEmailField(body.email, { requireShape: true });
 
-    // Scoped to the organization, not global: the same address may be an IT contact of
-    // several organizations, which is why the index is on both fields.
+    // Scoped to the organization: the same address may be an IT contact of several. Matched
+    // through `emailsMatch` rather than the collection's email index, because uniqueness is
+    // case-insensitive while the address is stored as the caller spelled it.
     const taken = ws.itContacts
       .findBy('organization_id', organizationId)
       .some((existing) => emailsMatch(existing.email, email));
@@ -74,23 +73,20 @@ export function itContactRoutes(ctx: RouteContext): void {
       invite_intents: null,
       invite_setup_link: null,
     });
-    // No invitation is sent on create, per the spec: an invitation is a separate call.
     return c.json(formatItContact(contact), 201);
   });
 
-  // Delete an IT contact
-  app.delete('/organizations/:organization_id/it_contacts/:contact_id', (c) => {
-    const contact = requireContact(c.req.param('organization_id'), c.req.param('contact_id'));
+  app.delete('/organizations/:organizationId/it_contacts/:contactId', (c) => {
+    const contact = requireContact(c.req.param('organizationId'), c.req.param('contactId'));
     // "Remove an IT contact ... and revoke the contact's active setup links" — deleting the
     // record drops its invitation with it, which frees the organization's single active slot.
     ws.itContacts.delete(contact.id);
     return c.body(null, 204);
   });
 
-  // Invite an IT contact to the Admin Portal
-  app.post('/organizations/:organization_id/it_contacts/:contact_id/invite', async (c) => {
-    const organizationId = c.req.param('organization_id');
-    const contact = requireContact(organizationId, c.req.param('contact_id'));
+  app.post('/organizations/:organizationId/it_contacts/:contactId/invite', async (c) => {
+    const organizationId = c.req.param('organizationId');
+    const contact = requireContact(organizationId, c.req.param('contactId'));
     const body = await parseJsonBody(c);
 
     const intents = body.intents;
@@ -99,8 +95,8 @@ export function itContactRoutes(ctx: RouteContext): void {
         { field: 'intents', code: 'required' },
       ]);
     }
-    const unknown = intents.filter((i) => typeof i !== 'string' || !INVITE_INTENTS.includes(i));
-    if (unknown.length > 0) {
+    const invalid = intents.filter((i) => typeof i !== 'string' || !INVITE_INTENTS.includes(i as never));
+    if (invalid.length > 0) {
       throw validationError(`intents must be one of: ${INVITE_INTENTS.join(', ')}`, [
         { field: 'intents', code: 'invalid' },
       ]);
@@ -124,7 +120,10 @@ export function itContactRoutes(ctx: RouteContext): void {
     // The setup link the invitation would have emailed. Nothing delivers it and no route
     // serves it; it exists so the invitation has the artifact production would have created.
     const baseUrl = new URL(c.req.url).origin;
-    ws.itContacts.update(contact.id, {
+    // Silent, like the emulator's other non-serialized stamps (`last_used_at`,
+    // `last_sign_in_at`): none of this reaches the wire, so `updated_at` must not move and
+    // claim the resource changed.
+    ws.itContacts.updateSilent(contact.id, {
       invited_at: new Date().toISOString(),
       invite_intents: intents as string[],
       invite_setup_link: `${baseUrl}/portal/setup/${contact.id}`,
@@ -132,18 +131,16 @@ export function itContactRoutes(ctx: RouteContext): void {
     return c.body(null, 204);
   });
 
-  // Revoke the organization's active invitation
-  app.post('/organizations/:organization_id/it_contacts/:contact_id/revoke', (c) => {
-    const organizationId = c.req.param('organization_id');
-    requireContact(organizationId, c.req.param('contact_id'));
+  app.post('/organizations/:organizationId/it_contacts/:contactId/revoke', (c) => {
+    const organizationId = c.req.param('organizationId');
+    requireContact(organizationId, c.req.param('contactId'));
     // The spec revokes "the organization's active Admin Portal invitation", not this contact's:
     // there is at most one, and no route reports which contact holds it, so revoking through a
     // contact that does not hold it still has to clear it — otherwise a caller who cannot know
     // whom to address gets a 204 and stays wedged behind a 409 on the next invite.
     const active = activeInvitation(organizationId);
-    // With none active there is nothing to write: a no-op must not bump `updated_at`.
     if (active) {
-      ws.itContacts.update(active.id, { invited_at: null, invite_intents: null, invite_setup_link: null });
+      ws.itContacts.updateSilent(active.id, { invited_at: null, invite_intents: null, invite_setup_link: null });
     }
     return c.body(null, 204);
   });

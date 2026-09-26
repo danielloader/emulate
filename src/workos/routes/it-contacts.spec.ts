@@ -75,12 +75,25 @@ describe('IT contacts', () => {
     expect(res.status).toBe(201);
   });
 
+  it('trims the address, and a padded copy is the same contact', async () => {
+    const contact = await json(await create('  it@acme.com  '));
+    expect(contact.email).toBe('it@acme.com');
+    expect((await create('it@acme.com')).status).toBe(409);
+  });
+
   it('rejects a missing or malformed email', async () => {
     const post = (body: unknown) =>
       req(`/organizations/${organizationId}/it_contacts`, { method: 'POST', body: JSON.stringify(body) });
     expect((await post({})).status).toBe(422);
     expect((await post({ email: '   ' })).status).toBe(422);
     expect((await post({ email: 'not-an-email' })).status).toBe(422);
+    for (const malformed of ['@acme.com', 'it@', 'a@b@c', 'it there@acme.com']) {
+      expect((await post({ email: malformed })).status, malformed).toBe(422);
+    }
+    // A non-string names the type, as every other CRUD route does.
+    const typed = await post({ email: 123 });
+    expect(typed.status).toBe(422);
+    expect((await json(typed)).errors[0].code).toBe('invalid_type');
   });
 
   it('invites a contact and records the invitation', async () => {
@@ -107,11 +120,19 @@ describe('IT contacts', () => {
     expect(conflict.status).toBe(409);
     expect((await json(conflict)).code).toBe('it_contact_invitation_already_active');
 
-    // Revoking frees the slot.
+    // Revoking frees the slot, and clears the whole invitation rather than just the flag.
     expect(
       (await req(`/organizations/${organizationId}/it_contacts/${first.id}/revoke`, { method: 'POST' })).status,
     ).toBe(204);
+    const revoked = getWorkOSStore(store).itContacts.get(first.id)!;
+    expect(revoked.invited_at).toBeNull();
+    expect(revoked.invite_intents).toBeNull();
+    expect(revoked.invite_setup_link).toBeNull();
+
     expect((await invite(second.id)).status).toBe(204);
+    // The slot moved rather than being held by both.
+    expect(getWorkOSStore(store).itContacts.get(first.id)!.invited_at).toBeNull();
+    expect(getWorkOSStore(store).itContacts.get(second.id)!.invited_at).not.toBeNull();
   });
 
   it('re-invites the holder to refresh their link, leaving the count at one', async () => {
@@ -142,16 +163,23 @@ describe('IT contacts', () => {
     expect((await invite(other.id)).status).toBe(204);
   });
 
-  it('revokes with no active invitation as a no-op, without touching the record', async () => {
+  it('leaves updated_at alone: invitation state never reaches the wire', async () => {
     const contact = await json(await create('it@acme.com'));
-    const before = getWorkOSStore(store).itContacts.get(contact.id)!.updated_at;
+    const contacts = getWorkOSStore(store).itContacts;
+    // Pinned to a known value, because create and revoke otherwise land in the same
+    // millisecond and comparing live timestamps would pass however the route writes.
+    const STAMP = '2020-01-01T00:00:00.000Z';
+    contacts.updateSilent(contact.id, { updated_at: STAMP });
 
-    const res = await req(`/organizations/${organizationId}/it_contacts/${contact.id}/revoke`, { method: 'POST' });
-    expect(res.status).toBe(204);
-    const after = getWorkOSStore(store).itContacts.get(contact.id)!;
-    expect(after.invited_at).toBeNull();
-    // Nothing changed, so nothing was written.
-    expect(after.updated_at).toBe(before);
+    const revoke = () => req(`/organizations/${organizationId}/it_contacts/${contact.id}/revoke`, { method: 'POST' });
+    expect((await revoke()).status).toBe(204);
+    expect(contacts.get(contact.id)!.updated_at).toBe(STAMP);
+
+    // A real invitation, and revoking it, are equally invisible on the resource.
+    expect((await invite(contact.id)).status).toBe(204);
+    expect(contacts.get(contact.id)!.updated_at).toBe(STAMP);
+    expect((await revoke()).status).toBe(204);
+    expect(contacts.get(contact.id)!.updated_at).toBe(STAMP);
   });
 
   it('rejects invalid intents', async () => {
@@ -181,8 +209,23 @@ describe('IT contacts', () => {
     expect(
       (await req(`/organizations/${organizationId}/it_contacts/it_contact_nope`, { method: 'DELETE' })).status,
     ).toBe(404);
-    // Addressable only through its own organization.
-    expect((await req(`/organizations/${other.id}/it_contacts/${contact.id}`, { method: 'DELETE' })).status).toBe(404);
+    // Addressable only through its own organization, on every sub-route — not just DELETE.
+    for (const path of [
+      `/organizations/${other.id}/it_contacts/${contact.id}`,
+      `/organizations/${organizationId}/it_contacts/it_contact_nope`,
+    ]) {
+      expect((await req(path, { method: 'DELETE' })).status, path).toBe(404);
+      expect(
+        (await req(`${path}/invite`, { method: 'POST', body: JSON.stringify({ intents: ['sso'] }) })).status,
+        path,
+      ).toBe(404);
+      expect((await req(`${path}/revoke`, { method: 'POST' })).status, path).toBe(404);
+    }
+    // And creating against an organization that does not exist.
+    expect(
+      (await req('/organizations/org_nope/it_contacts', { method: 'POST', body: JSON.stringify({ email: 'a@b.com' }) }))
+        .status,
+    ).toBe(404);
   });
 
   it('drops contacts with the organization', async () => {

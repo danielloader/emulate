@@ -132,8 +132,8 @@ const IT_CONTACT_EXCLUDE = new Set([
   'invite_setup_link',
 ]);
 
-export function formatItContact(c: WorkOSItContact): Record<string, unknown> {
-  return formatEntity(c, { exclude: IT_CONTACT_EXCLUDE });
+export function formatItContact(contact: WorkOSItContact): Record<string, unknown> {
+  return formatEntity(contact, { exclude: IT_CONTACT_EXCLUDE });
 }
 
 export function formatMembership(m: WorkOSOrganizationMembership, ws: WorkOSStore): Record<string, unknown> {
