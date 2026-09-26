@@ -68,6 +68,7 @@ export const OBJECT_SCHEMA_MAP: readonly ShapeMapEntry[] = [
   { objectType: 'authentication_challenge', schemaName: 'AuthenticationChallenge' },
   // The spec names only the secret-bearing creation shape; the list route's secretless
   // variant is an inline schema, so `secret` is carried as a tracked gap on this entry.
+  { objectType: 'it_contact', schemaName: 'ItContact' },
   { objectType: 'connect_application_secret', schemaName: 'NewConnectApplicationSecret' },
   // `connect_application` is deliberately absent: `ConnectApplication` is an allOf over a
   // four-way oneOf (first-party / dynamically registered / third-party oauth, and m2m), and
@@ -162,6 +163,12 @@ export const ENVELOPE_SCHEMA_MAP: readonly EnvelopeMapEntry[] = [
   { method: 'GET', path: '/organizations', status: '200', schemaName: 'OrganizationList' },
   { method: 'GET', path: '/user_management/users', status: '200', schemaName: 'UserlandUserList' },
   { method: 'GET', path: '/connect/applications', status: '200', schemaName: 'ConnectApplicationList' },
+  {
+    method: 'GET',
+    path: '/organizations/{organization_id}/it_contacts',
+    status: '200',
+    schemaName: 'ItContactList',
+  },
   { method: 'GET', path: '/webhook_endpoints', status: '200', schemaName: 'WebhookEndpointList' },
   { method: 'GET', path: '/events', status: '200', schemaName: 'EventList' },
   {

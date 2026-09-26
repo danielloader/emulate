@@ -353,6 +353,38 @@ plus an `authentication_challenge`) instead of a session, completed with the
 `urn:workos:oauth:grant-type:mfa-totp` grant — so MFA administration and step-up login flows
 need no post-boot enrollment calls that in-memory state would lose on restart.
 
+### Organization IT contacts
+
+`/organizations/{id}/it_contacts` is implemented in full — list, create, delete, invite and
+revoke:
+
+```bash
+curl -X POST http://localhost:4100/organizations/org_01K.../it_contacts \
+  -H "Authorization: Bearer sk_test_ci_key" -H "Content-Type: application/json" \
+  -d '{"email":"it@acme.com"}'
+
+curl -X POST http://localhost:4100/organizations/org_01K.../it_contacts/it_contact_01K.../invite \
+  -H "Authorization: Bearer sk_test_ci_key" -H "Content-Type: application/json" \
+  -d '{"intents":["sso","directory_sync"]}'
+```
+
+Two production rules are enforced. An email may be an IT contact of a given organization only
+once — `409 it_contact_already_exists` otherwise, though the same address may serve several
+organizations. And an organization may hold **one active invitation at a time**: inviting a
+_second_ contact is `409 it_contact_invitation_already_active`, while re-inviting the contact
+who already holds it refreshes their link, since the count stays at one. Deleting a contact
+revokes its invitation, and `revoke` clears the organization's active invitation whichever
+contact you address it through — no endpoint reports which contact holds it.
+
+Nothing is emailed. `invite` records the setup link production would have sent, and `revoke`
+clears it; neither the link nor the invitation state appears in any response, because the
+spec's `it_contact` object documents no such fields and both routes answer `204`.
+
+The spec also documents `403` and `503` on all five routes. Neither is implemented: the
+emulator's store is not environment-scoped, so the forbidden case cannot arise, and `503` is a
+production infrastructure state. Both can still be injected per-route through the
+[error hooks](#error-hooks) if you need to exercise them.
+
 ### Pipes connected accounts
 
 `GET|POST|PUT|DELETE /user_management/users/{id}/connected_accounts/{slug}` serve a user's
