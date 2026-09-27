@@ -45,17 +45,39 @@ describe('IT contacts', () => {
     expect(contact.organization_id).toBeUndefined();
   });
 
-  it('lists contacts oldest first in a list envelope', async () => {
+  it('lists contacts newest first, as every other list route does', async () => {
     const first = await json(await create('first@acme.com'));
     const second = await json(await create('second@acme.com'));
+    // Back-dated so creation order and insertion order disagree: without the sort the ids
+    // alone would already come back in the asserted order.
     getWorkOSStore(store).itContacts.updateSilent(second.id, { created_at: '2020-01-01T00:00:00.000Z' });
 
     const res = await req(`/organizations/${organizationId}/it_contacts`);
     expect(res.status).toBe(200);
     const body = await json(res);
     expect(body.object).toBe('list');
-    expect(body.list_metadata).toEqual({ before: null, after: null });
-    expect(body.data.map((c: any) => c.id)).toEqual([second.id, first.id]);
+    expect(body.data.map((c: any) => c.id)).toEqual([first.id, second.id]);
+  });
+
+  it('paginates, and scopes the page to the organization', async () => {
+    const ids: string[] = [];
+    for (const n of [1, 2, 3]) ids.push((await json(await create(`c${n}@acme.com`))).id);
+    // Another organization's contacts must not leak into the page.
+    const other = await json(await req('/organizations', { method: 'POST', body: JSON.stringify({ name: 'Other' }) }));
+    await req(`/organizations/${other.id}/it_contacts`, {
+      method: 'POST',
+      body: JSON.stringify({ email: 'elsewhere@other.com' }),
+    });
+
+    const firstPage = await json(await req(`/organizations/${organizationId}/it_contacts?limit=2`));
+    expect(firstPage.data).toHaveLength(2);
+    expect(firstPage.list_metadata.after).not.toBeNull();
+
+    const nextPage = await json(
+      await req(`/organizations/${organizationId}/it_contacts?limit=2&after=${firstPage.list_metadata.after}`),
+    );
+    const paged = [...firstPage.data, ...nextPage.data].map((c: any) => c.id);
+    expect(paged.sort()).toEqual([...ids].sort());
   });
 
   it('rejects a duplicate email within the organization, case-insensitively', async () => {

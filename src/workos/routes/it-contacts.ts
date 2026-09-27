@@ -1,6 +1,13 @@
-import { type RouteContext, WorkOSApiError, notFound, parseJsonBody, validationError } from '../../core/index.js';
+import {
+  type RouteContext,
+  WorkOSApiError,
+  notFound,
+  parseJsonBody,
+  parseListParams,
+  validationError,
+} from '../../core/index.js';
 import type { WorkOSItContact } from '../entities.js';
-import { emailsMatch, formatItContact, requireEmailField } from '../helpers.js';
+import { emailsMatch, formatItContact, formatListResponse, requireEmailField } from '../helpers.js';
 import { getWorkOSStore } from '../store.js';
 
 /** The Admin Portal features an invitation may grant, per `InviteItContactDto`. */
@@ -30,16 +37,15 @@ export function itContactRoutes(ctx: RouteContext): void {
   app.get('/organizations/:organizationId/it_contacts', (c) => {
     const organizationId = c.req.param('organizationId');
     requireOrganization(organizationId);
-    const contacts = ws.itContacts
-      .findBy('organization_id', organizationId)
-      .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id));
-    // The spec gives this route no pagination parameters, so the whole set is one page and
-    // both cursors are null — the envelope is still `list`, which the SDKs deserialize.
-    return c.json({
-      object: 'list',
-      data: contacts.map(formatItContact),
-      list_metadata: { before: null, after: null },
+    // The spec documents no query parameters here, but it returns a cursor-bearing
+    // `ItContactList` all the same — and `/authorization/roles` is the same shape and is
+    // paginated. Serving the whole set with null cursors would make the envelope a lie the
+    // moment an organization has more contacts than a page.
+    const result = ws.itContacts.list({
+      ...parseListParams(new URL(c.req.url)),
+      filter: (contact) => contact.organization_id === organizationId,
     });
+    return c.json(formatListResponse(result, formatItContact));
   });
 
   app.post('/organizations/:organizationId/it_contacts', async (c) => {
