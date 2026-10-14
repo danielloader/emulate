@@ -59,25 +59,25 @@ describe('IT contacts', () => {
     expect(body.data.map((c: any) => c.id)).toEqual([first.id, second.id]);
   });
 
-  it('paginates, and scopes the page to the organization', async () => {
+  it('lists the whole set under null cursors, scoped to the organization', async () => {
     const ids: string[] = [];
     for (const n of [1, 2, 3]) ids.push((await json(await create(`c${n}@acme.com`))).id);
-    // Another organization's contacts must not leak into the page.
+    // Another organization's contacts must not leak into the list.
     const other = await json(await req('/organizations', { method: 'POST', body: JSON.stringify({ name: 'Other' }) }));
     await req(`/organizations/${other.id}/it_contacts`, {
       method: 'POST',
       body: JSON.stringify({ email: 'elsewhere@other.com' }),
     });
 
-    const firstPage = await json(await req(`/organizations/${organizationId}/it_contacts?limit=2`));
-    expect(firstPage.data).toHaveLength(2);
-    expect(firstPage.list_metadata.after).not.toBeNull();
+    const list = await json(await req(`/organizations/${organizationId}/it_contacts`));
+    expect(list.data.map((c: any) => c.id).sort()).toEqual([...ids].sort());
+    expect(list.list_metadata).toEqual({ before: null, after: null });
 
-    const nextPage = await json(
-      await req(`/organizations/${organizationId}/it_contacts?limit=2&after=${firstPage.list_metadata.after}`),
-    );
-    const paged = [...firstPage.data, ...nextPage.data].map((c: any) => c.id);
-    expect(paged.sort()).toEqual([...ids].sort());
+    // Production reads no query parameters here: a `limit` neither trims the set nor mints a
+    // cursor.
+    const limited = await json(await req(`/organizations/${organizationId}/it_contacts?limit=1`));
+    expect(limited.data).toHaveLength(3);
+    expect(limited.list_metadata).toEqual({ before: null, after: null });
   });
 
   it('rejects a duplicate email within the organization, case-insensitively', async () => {
@@ -85,6 +85,40 @@ describe('IT contacts', () => {
     const conflict = await create('DUPE@acme.com');
     expect(conflict.status).toBe(409);
     expect((await json(conflict)).code).toBe('it_contact_already_exists');
+  });
+
+  it('lowercases the address, so a mixed-case copy is the same contact', async () => {
+    // Production lowercases before it stores or compares, and its e2e suite asserts exactly
+    // this round trip.
+    const contact = await json(await create('IT-Contact@Example.com'));
+    expect(contact.email).toBe('it-contact@example.com');
+    expect(getWorkOSStore(store).itContacts.get(contact.id)!.email).toBe('it-contact@example.com');
+    const listed = (await json(await req(`/organizations/${organizationId}/it_contacts`))).data[0];
+    expect(listed.email).toBe('it-contact@example.com');
+
+    for (const spelling of ['it-contact@example.com', 'IT-Contact@Example.com']) {
+      const conflict = await create(spelling);
+      expect(conflict.status, spelling).toBe(409);
+      expect((await json(conflict)).code).toBe('it_contact_already_exists');
+    }
+  });
+
+  it('caps an organization at 20 contacts, and deleting one reopens the slot', async () => {
+    for (let n = 1; n <= 20; n++) expect((await create(`c${n}@acme.com`)).status, `contact ${n}`).toBe(201);
+
+    const overflow = await create('c21@acme.com');
+    expect(overflow.status).toBe(422);
+    expect(await json(overflow)).toMatchObject({
+      code: 'too_many_it_contacts',
+      message: 'An organization can have at most 20 IT contacts.',
+    });
+
+    // The cap counts contacts, not creations: removing one makes room for another.
+    const first = getWorkOSStore(store).itContacts.findOneBy('email', 'c1@acme.com')!;
+    expect((await req(`/organizations/${organizationId}/it_contacts/${first.id}`, { method: 'DELETE' })).status).toBe(
+      204,
+    );
+    expect((await create('c21@acme.com')).status).toBe(201);
   });
 
   it('allows the same email in a different organization', async () => {
@@ -157,19 +191,24 @@ describe('IT contacts', () => {
     expect(getWorkOSStore(store).itContacts.get(second.id)!.invited_at).not.toBeNull();
   });
 
-  it('re-invites the holder to refresh their link, leaving the count at one', async () => {
+  it('conflicts on re-inviting the holder, as production does', async () => {
     const first = await json(await create('first@acme.com'));
-    const second = await json(await create('second@acme.com'));
     await invite(first.id, ['sso']);
-    const before = getWorkOSStore(store).itContacts.get(first.id)!.invite_setup_link;
+    const before = getWorkOSStore(store).itContacts.get(first.id)!;
 
-    // The organization still has exactly one invitation, so this is a resend, not a conflict.
+    // Production counts every active link in the organization, holder included, so a resend
+    // is the same 409 and the invitation is left exactly as it was.
+    const conflict = await invite(first.id, ['directory_sync']);
+    expect(conflict.status).toBe(409);
+    expect((await json(conflict)).code).toBe('it_contact_invitation_already_active');
+    expect(getWorkOSStore(store).itContacts.get(first.id)).toEqual(before);
+
+    // Revoke first, and the resend goes through.
+    expect(
+      (await req(`/organizations/${organizationId}/it_contacts/${first.id}/revoke`, { method: 'POST' })).status,
+    ).toBe(204);
     expect((await invite(first.id, ['directory_sync'])).status).toBe(204);
-    const after = getWorkOSStore(store).itContacts.get(first.id)!;
-    expect(after.invite_intents).toEqual(['directory_sync']);
-    expect(after.invite_setup_link).toBe(before);
-    // And the slot is still taken against anyone else.
-    expect((await invite(second.id)).status).toBe(409);
+    expect(getWorkOSStore(store).itContacts.get(first.id)!.invite_intents).toEqual(['directory_sync']);
   });
 
   it("revokes the organization's invitation through a contact that does not hold it", async () => {

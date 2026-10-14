@@ -1,17 +1,13 @@
-import {
-  type RouteContext,
-  WorkOSApiError,
-  notFound,
-  parseJsonBody,
-  parseListParams,
-  validationError,
-} from '../../core/index.js';
+import { type RouteContext, WorkOSApiError, notFound, parseJsonBody, validationError } from '../../core/index.js';
 import type { WorkOSItContact } from '../entities.js';
-import { emailsMatch, formatItContact, formatListResponse, requireEmailField } from '../helpers.js';
+import { formatItContact, requireEmailField } from '../helpers.js';
 import { getWorkOSStore } from '../store.js';
 
 /** The Admin Portal features an invitation may grant, per `InviteItContactDto`. */
 const INVITE_INTENTS = ['sso', 'directory_sync', 'log_streams', 'domain_verification', 'bring_your_own_key'] as const;
+
+/** Production's `MAX_IT_CONTACTS_PER_ORGANIZATION`: the (N+1)th create is `422 too_many_it_contacts`. */
+const MAX_IT_CONTACTS_PER_ORGANIZATION = 20;
 
 export function itContactRoutes(ctx: RouteContext): void {
   const { app, store } = ctx;
@@ -37,15 +33,18 @@ export function itContactRoutes(ctx: RouteContext): void {
   app.get('/organizations/:organizationId/it_contacts', (c) => {
     const organizationId = c.req.param('organizationId');
     requireOrganization(organizationId);
-    // The spec documents no query parameters here, but it returns a cursor-bearing
-    // `ItContactList` all the same — and `/authorization/roles` is the same shape and is
-    // paginated. Serving the whole set with null cursors would make the envelope a lie the
-    // moment an organization has more contacts than a page.
-    const result = ws.itContacts.list({
-      ...parseListParams(new URL(c.req.url)),
-      filter: (contact) => contact.organization_id === organizationId,
+    // Production serves the organization's whole set under null cursors and reads no query
+    // parameters — the cap keeps it small — so `limit`, `before`, `after` and `order` are
+    // ignored here too. Newest first, as the emulator's other lists are; production's query
+    // has no ORDER BY, so no order is a lie.
+    const contacts = ws.itContacts
+      .findBy('organization_id', organizationId)
+      .sort((a, b) => b.created_at.localeCompare(a.created_at) || b.id.localeCompare(a.id));
+    return c.json({
+      object: 'list',
+      data: contacts.map(formatItContact),
+      list_metadata: { before: null, after: null },
     });
-    return c.json(formatListResponse(result, formatItContact));
   });
 
   app.post('/organizations/:organizationId/it_contacts', async (c) => {
@@ -54,20 +53,29 @@ export function itContactRoutes(ctx: RouteContext): void {
     const body = await parseJsonBody(c);
 
     // `requireShape`, because this creates a contact from the address rather than looking one
-    // up: a stored typo is an invitation that can never reach anyone.
-    const email = requireEmailField(body.email, { requireShape: true });
+    // up: a stored typo is an invitation that can never reach anyone. Lowercased after the
+    // presence check, as production does before it stores or compares the address: the
+    // contact comes back as `it@acme.com` however the caller spelled it.
+    const email = requireEmailField(body.email, { requireShape: true }).toLowerCase();
 
-    // Scoped to the organization: the same address may be an IT contact of several. Matched
-    // through `emailsMatch` rather than the collection's email index, because uniqueness is
-    // case-insensitive while the address is stored as the caller spelled it.
-    const taken = ws.itContacts
-      .findBy('organization_id', organizationId)
-      .some((existing) => emailsMatch(existing.email, email));
+    // Scoped to the organization: the same address may be an IT contact of several. An exact
+    // match on the email index is enough, since every stored address is already lowercased.
+    const taken = ws.itContacts.findBy('email', email).some((existing) => existing.organization_id === organizationId);
     if (taken) {
       throw new WorkOSApiError(
         409,
-        'The email address is already an IT contact of the organization.',
+        `'${email}' is already an IT contact of organization '${organizationId}'.`,
         'it_contact_already_exists',
+      );
+    }
+
+    if (
+      ws.itContacts.count((existing) => existing.organization_id === organizationId) >= MAX_IT_CONTACTS_PER_ORGANIZATION
+    ) {
+      throw new WorkOSApiError(
+        422,
+        `An organization can have at most ${MAX_IT_CONTACTS_PER_ORGANIZATION} IT contacts.`,
+        'too_many_it_contacts',
       );
     }
 
@@ -111,14 +119,13 @@ export function itContactRoutes(ctx: RouteContext): void {
       throw validationError('intents must not contain duplicates', [{ field: 'intents', code: 'invalid' }]);
     }
 
-    // "An organization can have at most one active invitation" — so a second contact conflicts,
-    // but re-inviting the one that already holds it refreshes their link and leaves the count
-    // at one, which is the resend a caller reaches for when the first email goes astray.
-    const active = activeInvitation(organizationId);
-    if (active && active.id !== contact.id) {
+    // "An organization can have at most one active invitation" — and production counts every
+    // active link in the organization, with no exemption for the contact who holds it: a
+    // re-invite is the same 409, and the caller revokes first to resend.
+    if (activeInvitation(organizationId)) {
       throw new WorkOSApiError(
         409,
-        'Another IT contact invitation is already active for the organization.',
+        'An IT contact invitation is already active for this organization. Revoke it through any of its IT contacts before creating another.',
         'it_contact_invitation_already_active',
       );
     }

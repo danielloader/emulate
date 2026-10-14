@@ -368,13 +368,16 @@ curl -X POST http://localhost:4100/organizations/org_01K.../it_contacts/it_conta
   -d '{"intents":["sso","directory_sync"]}'
 ```
 
-Two production rules are enforced. An email may be an IT contact of a given organization only
-once — `409 it_contact_already_exists` otherwise, though the same address may serve several
-organizations. And an organization may hold **one active invitation at a time**: inviting a
-_second_ contact is `409 it_contact_invitation_already_active`, while re-inviting the contact
-who already holds it refreshes their link, since the count stays at one. Deleting a contact
-revokes its invitation, and `revoke` clears the organization's active invitation whichever
-contact you address it through — no endpoint reports which contact holds it.
+Three production rules are enforced. The address is lowercased before it is stored, and an
+email may be an IT contact of a given organization only once — `409 it_contact_already_exists`
+otherwise, in any casing — though the same address may serve several organizations. An
+organization holds at most 20 contacts; the 21st is `422 too_many_it_contacts`. And an
+organization may hold **one active invitation at a time**: inviting _any_ contact while one is
+active is `409 it_contact_invitation_already_active`, including the contact who holds it, so
+revoke before you resend. Deleting a contact revokes its invitation, and `revoke` clears the
+organization's active invitation whichever contact you address it through — no endpoint
+reports which contact holds it. The list serves the whole set under null cursors and reads no
+query parameters, as production does.
 
 Nothing is emailed. `invite` records the setup link production would have sent, and `revoke`
 clears it; neither the link nor the invitation state appears in any response, because the
